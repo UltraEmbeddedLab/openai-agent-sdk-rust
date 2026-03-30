@@ -2,7 +2,7 @@
 //
 // Run with: `cargo bench`
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn runner_benchmark(c: &mut Criterion) {
     // TODO: Add benchmarks once Runner is implemented.
