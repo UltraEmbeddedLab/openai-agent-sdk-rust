@@ -1,0 +1,74 @@
+---
+source: src/schema.rs
+assertion_line: 548
+expression: strict
+---
+{
+  "$schema": "https://spec.openapis.org/oas/3.0/schema/2024-10-18#/definitions/Schema",
+  "additionalProperties": false,
+  "components": {
+    "schemas": {
+      "Address": {
+        "additionalProperties": false,
+        "properties": {
+          "city": {
+            "type": "string"
+          },
+          "street": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "city",
+          "street"
+        ],
+        "type": "object"
+      },
+      "Color": {
+        "enum": [
+          "Red",
+          "Green",
+          "Blue"
+        ],
+        "type": "string"
+      }
+    }
+  },
+  "properties": {
+    "address": {
+      "$ref": "#/components/schemas/Address"
+    },
+    "age": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "color": {
+      "$ref": "#/components/schemas/Color"
+    },
+    "email": {
+      "nullable": true,
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "address",
+    "age",
+    "color",
+    "email",
+    "name",
+    "tags"
+  ],
+  "strict": true,
+  "title": "ComplexStruct",
+  "type": "object"
+}

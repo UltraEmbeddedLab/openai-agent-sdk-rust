@@ -1,6 +1,6 @@
-//! # OpenAI Agents SDK for Rust
+//! # `OpenAI` Agents SDK for Rust
 //!
-//! A lightweight, ergonomic framework for building multi-agent workflows powered by OpenAI.
+//! A lightweight, ergonomic framework for building multi-agent workflows powered by `OpenAI`.
 //!
 //! This crate is a Rust port of the [OpenAI Agents Python SDK](https://github.com/openai/openai-agents-python),
 //! bringing the same powerful abstractions to the Rust ecosystem with full type safety and async support.
@@ -46,13 +46,13 @@
 // See CLAUDE.md for the complete module mapping.
 
 // pub mod agent;
-// pub mod config;
-// pub mod context;
-// pub mod error;
-// pub mod guardrail;
-// pub mod handoffs;
-// pub mod items;
-// pub mod lifecycle;
+pub mod config;
+pub mod context;
+pub mod error;
+pub mod guardrail;
+pub mod handoffs;
+pub mod items;
+pub mod lifecycle;
 // pub mod memory;
 // pub mod mcp;
 // pub mod models;
@@ -60,8 +60,8 @@
 // pub mod result;
 // pub mod run_internal;
 // pub mod runner;
-// pub mod schema;
-// pub mod stream_events;
-// pub mod tool;
+pub mod schema;
+pub mod stream_events;
+pub mod tool;
 // pub mod tracing_mod;
-// pub mod usage;
+pub mod usage;
