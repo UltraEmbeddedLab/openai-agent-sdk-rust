@@ -45,7 +45,7 @@
 // TODO: Implement core modules — each module below corresponds to a Python SDK module.
 // See CLAUDE.md for the complete module mapping.
 
-// pub mod agent;
+pub mod agent;
 pub mod config;
 pub mod context;
 pub mod error;
