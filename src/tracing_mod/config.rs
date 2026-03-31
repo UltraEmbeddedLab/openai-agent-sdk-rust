@@ -131,6 +131,10 @@ pub fn is_tracing_disabled() -> bool {
 mod tests {
     use super::*;
 
+    // Serialize tests that touch global TRACING_DISABLED to prevent races
+    // under `cargo tarpaulin` which may run tests in a single process.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_config_values() {
         let config = TracingConfig::default();
@@ -171,22 +175,23 @@ mod tests {
 
     #[test]
     fn tracing_disabled_default_is_false() {
-        // Reset to known state first.
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
         set_tracing_disabled(false);
         assert!(!is_tracing_disabled());
     }
 
     #[test]
     fn set_and_read_tracing_disabled() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
         set_tracing_disabled(true);
         assert!(is_tracing_disabled());
-        // Reset so other tests are not affected.
         set_tracing_disabled(false);
         assert!(!is_tracing_disabled());
     }
 
     #[test]
     fn toggle_tracing_disabled_repeatedly() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
         for _ in 0..100 {
             set_tracing_disabled(true);
             assert!(is_tracing_disabled());

@@ -150,7 +150,7 @@ impl RunResultStreaming {
 
     /// Stream events as they are produced by the runner.
     ///
-    /// This returns a `Stream` that yields [`StreamEvent`] values until the
+    /// This returns a `Stream` that yields [`crate::stream_events::StreamEvent`] values until the
     /// run completes or is cancelled. The receiver is taken from the struct
     /// on the first call; subsequent calls will return an empty stream.
     pub fn stream_events(&mut self) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {

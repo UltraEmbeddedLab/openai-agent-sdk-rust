@@ -398,8 +398,13 @@ mod tests {
 
     use super::*;
 
+    // Serialize tests that touch the global wrappers mutex to prevent races
+    // under `cargo tarpaulin` which may run tests in a single process.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Ensure we reset global state between tests to avoid ordering issues.
     fn with_default_wrappers<F: FnOnce()>(f: F) {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
         reset_conversation_history_wrappers();
         f();
         reset_conversation_history_wrappers();
