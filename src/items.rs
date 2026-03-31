@@ -182,6 +182,25 @@ pub struct ModelResponse {
 }
 
 impl ModelResponse {
+    /// Create a new model response with the given output and usage.
+    ///
+    /// This constructor is the primary way to build a `ModelResponse` from outside
+    /// this crate, since the struct is marked `#[non_exhaustive]`.
+    #[must_use]
+    pub const fn new(
+        output: Vec<ResponseOutputItem>,
+        usage: Usage,
+        response_id: Option<String>,
+        request_id: Option<String>,
+    ) -> Self {
+        Self {
+            output,
+            usage,
+            response_id,
+            request_id,
+        }
+    }
+
     /// Convert the output items into a list of input items suitable for passing back to the model.
     #[must_use]
     pub fn to_input_items(&self) -> Vec<ResponseInputItem> {

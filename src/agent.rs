@@ -120,6 +120,17 @@ pub struct OutputSchema {
     pub strict: bool,
 }
 
+impl OutputSchema {
+    /// Create a new output schema.
+    #[must_use]
+    pub const fn new(json_schema: serde_json::Value, strict: bool) -> Self {
+        Self {
+            json_schema,
+            strict,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------

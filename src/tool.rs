@@ -51,6 +51,22 @@ pub struct ToolContext<C: Send + Sync + 'static> {
     pub tool_call_id: String,
 }
 
+impl<C: Send + Sync + 'static> ToolContext<C> {
+    /// Create a new tool context.
+    #[must_use]
+    pub fn new(
+        context: Arc<tokio::sync::RwLock<RunContextWrapper<C>>>,
+        tool_name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            context,
+            tool_name: tool_name.into(),
+            tool_call_id: tool_call_id.into(),
+        }
+    }
+}
+
 impl<C: Send + Sync + 'static> Clone for ToolContext<C> {
     fn clone(&self) -> Self {
         Self {
@@ -281,6 +297,22 @@ pub struct FunctionToolResult {
     pub tool_call_id: String,
     /// The output produced by the tool invocation.
     pub output: ToolOutput,
+}
+
+impl FunctionToolResult {
+    /// Create a new function tool result.
+    #[must_use]
+    pub fn new(
+        tool_name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        output: ToolOutput,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            tool_call_id: tool_call_id.into(),
+            output,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

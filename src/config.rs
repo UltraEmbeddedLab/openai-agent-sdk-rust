@@ -85,6 +85,48 @@ impl ModelSettings {
         Self::default()
     }
 
+    /// Set the temperature and return `self` (fluent builder).
+    #[must_use]
+    pub const fn with_temperature(mut self, temperature: f64) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set the top-p and return `self` (fluent builder).
+    #[must_use]
+    pub const fn with_top_p(mut self, top_p: f64) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Set the max tokens and return `self` (fluent builder).
+    #[must_use]
+    pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set the tool choice and return `self` (fluent builder).
+    #[must_use]
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// Set the truncation strategy and return `self` (fluent builder).
+    #[must_use]
+    pub const fn with_truncation(mut self, truncation: Truncation) -> Self {
+        self.truncation = Some(truncation);
+        self
+    }
+
+    /// Set whether to store the response and return `self` (fluent builder).
+    #[must_use]
+    pub const fn with_store(mut self, store: bool) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     /// Produces a new `ModelSettings` by overlaying any non-`None` values from
     /// `override_settings` on top of this instance.
     ///
