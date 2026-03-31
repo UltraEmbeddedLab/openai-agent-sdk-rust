@@ -27,7 +27,7 @@ use crate::models::{
 use crate::usage::Usage;
 
 /// User agent string sent with every request.
-const USER_AGENT: &str = "openai-agents-rs/0.1.0";
+const USER_AGENT: &str = "openai-agent-sdk-rust/0.1.0";
 
 /// Default base URL for the `OpenAI` API.
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";

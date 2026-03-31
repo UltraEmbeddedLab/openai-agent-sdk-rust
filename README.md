@@ -1,6 +1,6 @@
 # OpenAI Agents SDK for Rust
 
-[![CI](https://github.com/bogdan/openai-agents-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/bogdan/openai-agents-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/openai-agents.svg)](https://crates.io/crates/openai-agents)
 [![Documentation](https://docs.rs/openai-agents/badge.svg)](https://docs.rs/openai-agents)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## Documentation
 
-- [User Guide](https://bogdan.github.io/openai-agents-rs/) — comprehensive documentation
+- [User Guide](https://UltraEmbeddedLab.github.io/openai-agent-sdk-rust/) — comprehensive documentation
 - [API Reference](https://docs.rs/openai-agents) — auto-generated from doc comments
 - [Examples](./examples/) — runnable code samples
 
@@ -171,12 +171,10 @@ Agent<C> ──→ Runner::run() ──→ RunResult<O>
 
 ## Contributing
 
-See [AGENTS.md](./AGENTS.md) for the full contributor guide.
-
 ```bash
 # Setup
-git clone https://github.com/bogdan/openai-agents-rs.git
-cd openai-agents-rs
+git clone https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust.git
+cd openai-agent-sdk-rust
 
 # Development cycle
 cargo fmt --check
