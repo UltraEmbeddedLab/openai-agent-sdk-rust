@@ -1,9 +1,9 @@
 # OpenAI Agents SDK for Rust
 
 [![CI](https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/openai-agents.svg)](https://crates.io/crates/openai-agents)
-[![Documentation](https://docs.rs/openai-agents/badge.svg)](https://docs.rs/openai-agents)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **Note:** This project is under active development (v0.1.0-dev). APIs may change before the first stable release. Contributions and feedback are welcome!
 
 A lightweight, ergonomic Rust framework for building multi-agent workflows powered by OpenAI. This is a Rust port of the official [OpenAI Agents Python SDK](https://github.com/openai/openai-agents-python), bringing the same powerful abstractions to the Rust ecosystem with full type safety and async support.
 
