@@ -127,7 +127,7 @@ impl Runner {
     /// Run an agent in streaming mode, returning a [`RunResultStreaming`] immediately.
     ///
     /// The runner spawns a background task that drives the agent loop and sends
-    /// [`StreamEvent`] values through a channel. Use
+    /// [`crate::stream_events::StreamEvent`] values through a channel. Use
     /// [`RunResultStreaming::stream_events`] to consume them.
     ///
     /// The `agent` reference must be `'static` because it is moved into a spawned task.

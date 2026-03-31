@@ -10,7 +10,7 @@
 //! A voice workflow receives user transcriptions (text) and yields response text
 //! that will be turned into speech by a TTS model.  The simplest case is
 //! [`SingleAgentVoiceWorkflow`], which feeds each transcription to a single
-//! [`Agent`](crate::Agent) via [`Runner::run_streamed`](crate::Runner) and
+//! [`Agent`] via [`Runner::run_streamed`](crate::Runner) and
 //! streams back the text deltas.
 //!
 //! For more complex workflows (multiple agents, custom logic, branching
