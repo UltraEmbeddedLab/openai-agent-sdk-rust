@@ -30,5 +30,10 @@ lcov.info
 coverage/
 tarpaulin-report.html
 
-# Claude Code local settings (keep agents/ and skills/ in git)
-.claude/settings.local.json
+# Claude Code
+.claude/
+CLAUDE.md
+AGENTS.md
+
+# Cargo lock not needed for libraries
+Cargo.lock

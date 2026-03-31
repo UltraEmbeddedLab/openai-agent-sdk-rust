@@ -70,8 +70,8 @@ tracing-opentelemetry = { version = "0.32", optional = true }
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.14.0"
-pretty_assertions = "1"
-insta = { version = "1", features = ["json"] }
+pretty_assertions = "1.4.1"
+insta = { version = "1.47.2", features = ["json"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 wiremock = "0.6"
 temp-env = "0.3"
