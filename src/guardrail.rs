@@ -17,6 +17,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::context::RunContextWrapper;
 use crate::error::{AgentError, Result};
 use crate::items::InputContent;
@@ -46,7 +48,7 @@ type OutputGuardrailFn<C> = dyn for<'a> Fn(
 ///
 /// Contains metadata about the guardrail check and whether the tripwire was triggered.
 /// When `tripwire_triggered` is `true`, the agent run will be aborted.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct GuardrailFunctionOutput {
     /// Custom metadata or information from the guardrail check.
@@ -91,7 +93,7 @@ impl GuardrailFunctionOutput {
 }
 
 /// Result of running an input guardrail.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct InputGuardrailResult {
     /// Name of the guardrail that was run.
@@ -102,7 +104,7 @@ pub struct InputGuardrailResult {
 }
 
 /// Result of running an output guardrail.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct OutputGuardrailResult {
     /// Name of the guardrail that was run.

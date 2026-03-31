@@ -8,6 +8,10 @@
 //! Completions API in submodules. To add support for a custom model backend,
 //! implement the [`Model`] trait.
 
+pub mod multi_provider;
+pub mod openai_chatcompletions;
+pub mod openai_responses;
+
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -17,6 +21,9 @@ use tokio_stream::Stream;
 use crate::config::ModelSettings;
 use crate::error::Result;
 use crate::items::{ModelResponse, ResponseInputItem, ResponseStreamEvent};
+
+pub use multi_provider::MultiProvider;
+pub use openai_responses::{OpenAIProvider, OpenAIResponsesModel};
 
 /// Tracing configuration for model calls.
 ///

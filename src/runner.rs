@@ -26,13 +26,14 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, ToolUseBehavior};
-use crate::config::RunConfig;
+use crate::config::{DEFAULT_MAX_TURNS, RunConfig};
 use crate::context::RunContextWrapper;
 use crate::error::{AgentError, Result};
 use crate::guardrail::{InputGuardrailResult, OutputGuardrailResult};
@@ -43,7 +44,10 @@ use crate::items::{
 };
 use crate::lifecycle::RunHooks;
 use crate::models::{HandoffToolSpec, Model, ModelTracing, OutputSchemaSpec, ToolSpec};
-use crate::result::RunResult;
+use crate::prompts;
+use crate::result::{RunResult, RunResultStreaming};
+use crate::retry::RetryPolicy;
+use crate::stream_events::{RunItemEventName, StreamEvent};
 use crate::tool::{FunctionTool, Tool, ToolContext};
 use crate::usage::Usage;
 
@@ -89,12 +93,112 @@ impl Runner {
         hooks: Option<Arc<dyn RunHooks<C>>>,
         config: Option<RunConfig>,
     ) -> Result<RunResult> {
-        let config = config.unwrap_or_default();
+        // Delegate to the multi-agent run with no agent registry.
+        Self::run_internal(
+            agent,
+            &HashMap::new(),
+            input.into(),
+            context,
+            model,
+            hooks,
+            config,
+        )
+        .await
+    }
+
+    /// Run an agent with a registry of agents for multi-agent handoff support.
+    ///
+    /// When a handoff is detected, the runner looks up the target agent in `agents`,
+    /// applies any handoff input filter, fires handoff hooks, and continues the loop
+    /// with the new agent. The `starting_agent` does not need to be in `agents`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::UserError`] if a handoff target agent is not found in
+    /// the registry. Also propagates all errors from [`run_with_model`](Self::run_with_model).
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    pub async fn run_with_agents<C: Send + Sync + 'static>(
+        starting_agent: &Agent<C>,
+        agents: &HashMap<String, &Agent<C>>,
+        input: impl Into<InputContent>,
+        context: C,
+        model: Arc<dyn Model>,
+        hooks: Option<Arc<dyn RunHooks<C>>>,
+        config: Option<RunConfig>,
+    ) -> Result<RunResult> {
+        Self::run_internal(
+            starting_agent,
+            agents,
+            input.into(),
+            context,
+            model,
+            hooks,
+            config,
+        )
+        .await
+    }
+
+    /// Run an agent in streaming mode, returning a [`RunResultStreaming`] immediately.
+    ///
+    /// The runner spawns a background task that drives the agent loop and sends
+    /// [`StreamEvent`] values through a channel. Use
+    /// [`RunResultStreaming::stream_events`] to consume them.
+    ///
+    /// The `agent` reference must be `'static` because it is moved into a spawned task.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The agent to run.
+    /// * `input` - The user input.
+    /// * `context` - The user-provided context value.
+    /// * `model` - The model to use for inference.
+    /// * `hooks` - Optional run-level lifecycle hooks.
+    /// * `config` - Optional run configuration.
+    pub fn run_streamed<C: Send + Sync + 'static>(
+        agent: &'static Agent<C>,
+        input: impl Into<InputContent> + Send + 'static,
+        context: C,
+        model: Arc<dyn Model>,
+        hooks: Option<Arc<dyn RunHooks<C>>>,
+        config: Option<RunConfig>,
+    ) -> RunResultStreaming {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+
         let input = input.into();
+        let max_turns = config.as_ref().map_or(DEFAULT_MAX_TURNS, |c| c.max_turns);
+
+        let result = RunResultStreaming::new(
+            input.clone(),
+            agent.name.clone(),
+            max_turns,
+            event_rx,
+            cancel_tx,
+        );
+
+        tokio::spawn(Self::streaming_loop(
+            agent, input, context, model, hooks, config, event_tx, cancel_rx,
+        ));
+
+        result
+    }
+
+    /// Internal method that implements the full agent loop with optional multi-agent support.
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    async fn run_internal<C: Send + Sync + 'static>(
+        starting_agent: &Agent<C>,
+        agents: &HashMap<String, &Agent<C>>,
+        input: InputContent,
+        context: C,
+        model: Arc<dyn Model>,
+        hooks: Option<Arc<dyn RunHooks<C>>>,
+        config: Option<RunConfig>,
+    ) -> Result<RunResult> {
+        let config = config.unwrap_or_default();
         let ctx = Arc::new(RwLock::new(RunContextWrapper::new(context)));
         let max_turns = config.max_turns;
 
-        let current_agent = agent;
+        let mut current_agent = starting_agent;
         let mut current_input = ItemHelpers::input_to_new_input_list(&input);
         let mut all_items: Vec<RunItem> = Vec::new();
         let mut all_responses: Vec<ModelResponse> = Vec::new();
@@ -109,6 +213,8 @@ impl Runner {
             ModelTracing::Enabled
         };
 
+        let retry_policy = RetryPolicy::none();
+
         for turn in 0..max_turns {
             // 1. Fire agent start hooks.
             {
@@ -121,10 +227,17 @@ impl Runner {
                 }
             }
 
-            // 2. Get agent instructions.
+            // 2. Get agent instructions and build system prompt.
             let system_prompt = {
                 let ctx_read = ctx.read().await;
-                current_agent.get_instructions(&ctx_read).await?
+                let raw_instructions = current_agent.get_instructions(&ctx_read).await?;
+                let tool_specs = build_tool_specs(current_agent);
+                let handoff_specs_for_prompt = &current_agent.handoffs;
+                prompts::build_system_prompt(
+                    raw_instructions.as_deref(),
+                    &tool_specs,
+                    handoff_specs_for_prompt,
+                )
             };
 
             // 3. Set the turn input on the context.
@@ -180,18 +293,27 @@ impl Runner {
                 .model_settings
                 .resolve(config.model_settings.as_ref());
 
-            // 7. Call the model.
-            let response = model
-                .get_response(
-                    system_prompt.as_deref(),
-                    &current_input,
-                    &model_settings,
-                    &tool_specs,
-                    output_schema_spec.as_ref(),
-                    &handoff_specs,
-                    tracing,
-                    previous_response_id.as_deref(),
-                )
+            // 7. Call the model with retry support.
+            let sys_prompt_ref = system_prompt.as_deref();
+            let input_ref = &current_input;
+            let tool_specs_ref = &tool_specs;
+            let output_schema_ref = output_schema_spec.as_ref();
+            let handoff_specs_ref = &handoff_specs;
+            let prev_resp_id = previous_response_id.as_deref();
+
+            let response = retry_policy
+                .execute(|| {
+                    model.get_response(
+                        sys_prompt_ref,
+                        input_ref,
+                        &model_settings,
+                        tool_specs_ref,
+                        output_schema_ref,
+                        handoff_specs_ref,
+                        tracing,
+                        prev_resp_id,
+                    )
+                })
                 .await?;
 
             // 8. Accumulate usage.
@@ -319,7 +441,7 @@ impl Runner {
 
                     turn_items.push(RunItem::HandoffOutput(HandoffOutputItem {
                         agent_name: current_agent.name.clone(),
-                        raw_item: handoff_output_raw,
+                        raw_item: handoff_output_raw.clone(),
                         source_agent_name: current_agent.name.clone(),
                         target_agent_name: target_agent_name.clone(),
                     }));
@@ -330,6 +452,75 @@ impl Runner {
                             .on_handoff(&ctx_read, &current_agent.name, &target_agent_name)
                             .await;
                     }
+
+                    // Collect items before switching agent.
+                    all_items.extend(turn_items);
+                    all_responses.push(response);
+
+                    // Look up the target agent in the registry.
+                    if let Some(target_agent) = agents.get(target_agent_name.as_str()) {
+                        current_agent = target_agent;
+
+                        // Build the next input: current input + response output + handoff output.
+                        let last_response =
+                            all_responses.last().ok_or_else(|| AgentError::UserError {
+                                message: "internal error: no model responses after model call"
+                                    .to_string(),
+                            })?;
+                        let mut next_input = current_input.clone();
+                        next_input.extend(last_response.to_input_items());
+                        next_input.push(handoff_output_raw);
+                        current_input = next_input;
+
+                        continue;
+                    }
+
+                    // If the registry is empty (single-agent mode), return as before.
+                    if agents.is_empty() {
+                        let final_output = extract_final_output(&all_items, &all_responses);
+
+                        // Run output guardrails.
+                        {
+                            let ctx_read2 = ctx.read().await;
+                            for guardrail in &current_agent.output_guardrails {
+                                let result = guardrail
+                                    .run(&ctx_read2, &current_agent.name, &final_output)
+                                    .await?;
+                                output_guardrail_results.push(result);
+                            }
+                        }
+
+                        // Fire agent end hooks.
+                        {
+                            let ctx_read2 = ctx.read().await;
+                            if let Some(ref hooks) = hooks {
+                                hooks
+                                    .on_agent_end(&ctx_read2, &current_agent.name, &final_output)
+                                    .await;
+                            }
+                            if let Some(ref agent_hooks) = current_agent.hooks {
+                                agent_hooks.on_end(&ctx_read2, &final_output).await;
+                            }
+                        }
+
+                        return Ok(RunResult {
+                            input: input.clone(),
+                            new_items: all_items,
+                            raw_responses: all_responses,
+                            final_output,
+                            last_agent_name: current_agent.name.clone(),
+                            input_guardrail_results,
+                            output_guardrail_results,
+                            usage: total_usage,
+                        });
+                    }
+
+                    // Agent not found in registry.
+                    return Err(AgentError::UserError {
+                        message: format!(
+                            "Handoff target agent '{target_agent_name}' not found in registry"
+                        ),
+                    });
                 }
             }
 
@@ -338,7 +529,6 @@ impl Runner {
             all_responses.push(response);
 
             // 14. Determine next step based on ToolUseBehavior.
-            // Check if a handoff occurred during this turn (not all items).
             let has_handoff = !handoff_calls.is_empty();
 
             let should_stop = match &current_agent.tool_use_behavior {
@@ -414,6 +604,179 @@ impl Runner {
         }
 
         Err(AgentError::MaxTurnsExceeded { max_turns })
+    }
+
+    /// Background task that drives the streaming agent loop.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    async fn streaming_loop<C: Send + Sync + 'static>(
+        agent: &'static Agent<C>,
+        input: InputContent,
+        context: C,
+        model: Arc<dyn Model>,
+        hooks: Option<Arc<dyn RunHooks<C>>>,
+        config: Option<RunConfig>,
+        event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let config = config.unwrap_or_default();
+        let ctx = Arc::new(RwLock::new(RunContextWrapper::new(context)));
+        let max_turns = config.max_turns;
+
+        let mut current_input = ItemHelpers::input_to_new_input_list(&input);
+
+        let tracing = if config.tracing_disabled {
+            ModelTracing::Disabled
+        } else {
+            ModelTracing::Enabled
+        };
+
+        for _turn in 0..max_turns {
+            // Check for cancellation.
+            if cancel_rx.try_recv().is_ok() {
+                return;
+            }
+
+            // Get system prompt via prompts module.
+            let raw_instructions = {
+                let ctx_read = ctx.read().await;
+                let Ok(instr) = agent.get_instructions(&ctx_read).await else {
+                    return;
+                };
+                instr
+            };
+            let tool_specs_for_prompt = build_tool_specs(agent);
+            let system_prompt = prompts::build_system_prompt(
+                raw_instructions.as_deref(),
+                &tool_specs_for_prompt,
+                &agent.handoffs,
+            );
+
+            let tool_specs = build_tool_specs(agent);
+            let handoff_specs = build_handoff_specs(agent);
+            let output_schema_spec = agent.output_type.as_ref().map(|s| OutputSchemaSpec {
+                json_schema: s.json_schema.clone(),
+                strict: s.strict,
+            });
+
+            let model_settings = agent.model_settings.resolve(config.model_settings.as_ref());
+
+            // Fire agent start hooks.
+            {
+                let ctx_read = ctx.read().await;
+                if let Some(ref hooks) = hooks {
+                    hooks.on_agent_start(&ctx_read, &agent.name).await;
+                }
+            }
+
+            // Stream model response in its own scope so borrows are released.
+            let collected_output = {
+                use tokio_stream::StreamExt;
+
+                let mut stream = model.stream_response(
+                    system_prompt.as_deref(),
+                    &current_input,
+                    &model_settings,
+                    &tool_specs,
+                    output_schema_spec.as_ref(),
+                    &handoff_specs,
+                    tracing,
+                    None,
+                );
+
+                let mut collected: Vec<serde_json::Value> = Vec::new();
+
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut cancel_rx => {
+                            return;
+                        }
+                        maybe_event = stream.next() => {
+                            match maybe_event {
+                                Some(Ok(event)) => {
+                                    collected.push(event.clone());
+                                    // Send raw event.
+                                    if event_tx.send(StreamEvent::RawResponse(event)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Some(Err(_)) => {
+                                    return;
+                                }
+                                None => {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                collected
+            };
+
+            // Process collected events into run items.
+            let model_response = ModelResponse {
+                output: collected_output,
+                usage: Usage::default(),
+                response_id: None,
+                request_id: None,
+            };
+
+            let processed = process_model_response(agent, &model_response);
+
+            for item in &processed.new_items {
+                let event_name = match item {
+                    RunItem::MessageOutput(_) => RunItemEventName::MessageOutputCreated,
+                    RunItem::HandoffCall(_) => RunItemEventName::HandoffRequested,
+                    RunItem::HandoffOutput(_) => RunItemEventName::HandoffOccurred,
+                    RunItem::ToolCall(_) => RunItemEventName::ToolCalled,
+                    RunItem::ToolCallOutput(_) => RunItemEventName::ToolOutput,
+                    RunItem::Reasoning(_) => RunItemEventName::ReasoningItemCreated,
+                };
+
+                if event_tx
+                    .send(StreamEvent::RunItemCreated {
+                        name: event_name,
+                        item: item.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            // If there are no tool calls and no handoff calls, this is the final turn.
+            if processed.function_calls.is_empty() && processed.handoff_calls.is_empty() {
+                return;
+            }
+
+            // Execute function tool calls and append to input.
+            let mut tool_outputs_for_input: Vec<ResponseInputItem> = Vec::new();
+            for fc in &processed.function_calls {
+                let function_tool = find_function_tool(agent, &fc.name);
+                let output = if let Some(ft) = function_tool {
+                    let tool_ctx = ToolContext {
+                        context: Arc::clone(&ctx),
+                        tool_name: fc.name.clone(),
+                        tool_call_id: fc.call_id.clone(),
+                    };
+                    match ft.invoke(tool_ctx, fc.arguments.clone()).await {
+                        Ok(out) => out,
+                        Err(e) => ToolOutput::Text(format!("Error: {e}")),
+                    }
+                } else {
+                    ToolOutput::Text(format!("Error: tool '{}' not found", fc.name))
+                };
+                let output_item = ItemHelpers::tool_call_output_item(&fc.call_id, &output);
+                tool_outputs_for_input.push(output_item);
+            }
+
+            let mut next_input = current_input;
+            next_input.extend(model_response.to_input_items());
+            next_input.extend(tool_outputs_for_input);
+            current_input = next_input;
+        }
     }
 }
 
@@ -712,6 +1075,50 @@ mod tests {
         }
     }
 
+    /// A mock model that produces stream events.
+    struct StreamingMockModel {
+        events: Vec<serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl Model for StreamingMockModel {
+        async fn get_response(
+            &self,
+            _system_instructions: Option<&str>,
+            _input: &[ResponseInputItem],
+            _model_settings: &ModelSettings,
+            _tools: &[ToolSpec],
+            _output_schema: Option<&OutputSchemaSpec>,
+            _handoffs: &[HandoffToolSpec],
+            _tracing: ModelTracing,
+            _previous_response_id: Option<&str>,
+        ) -> Result<ModelResponse> {
+            Ok(ModelResponse {
+                output: vec![],
+                usage: Usage::default(),
+                response_id: None,
+                request_id: None,
+            })
+        }
+
+        fn stream_response<'a>(
+            &'a self,
+            _system_instructions: Option<&'a str>,
+            _input: &'a [ResponseInputItem],
+            _model_settings: &'a ModelSettings,
+            _tools: &'a [ToolSpec],
+            _output_schema: Option<&'a OutputSchemaSpec>,
+            _handoffs: &'a [HandoffToolSpec],
+            _tracing: ModelTracing,
+            _previous_response_id: Option<&'a str>,
+        ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+        {
+            let events: Vec<Result<crate::items::ResponseStreamEvent>> =
+                self.events.iter().map(|e| Ok(e.clone())).collect();
+            Box::pin(tokio_stream::iter(events))
+        }
+    }
+
     // ---- Test: simple text response ----
 
     #[tokio::test]
@@ -942,6 +1349,13 @@ mod tests {
                 .lock()
                 .await
                 .push(format!("agent_end:{agent_name}"));
+        }
+
+        async fn on_handoff(&self, _ctx: &RunContextWrapper<()>, from_agent: &str, to_agent: &str) {
+            self.calls
+                .lock()
+                .await
+                .push(format!("handoff:{from_agent}->{to_agent}"));
         }
 
         async fn on_llm_start(
@@ -1235,8 +1649,6 @@ mod tests {
 
         // Should stop after one turn (tool was called -> StopOnFirstTool -> stop).
         assert_eq!(result.raw_responses.len(), 1);
-        // The final output is null since there was no message, just tool output.
-        // That is fine for this behavior mode.
     }
 
     // ---- Test: Runner is Send + Sync ----
@@ -1295,5 +1707,267 @@ mod tests {
             result.output_guardrail_results[0].guardrail_name,
             "clean_check"
         );
+    }
+
+    // ---- Test: multi-agent handoff (agent A hands off to agent B, B produces output) ----
+
+    #[tokio::test]
+    async fn multi_agent_handoff() {
+        // Agent A receives input, returns a handoff call to B.
+        // Agent B receives the continued conversation and returns a message.
+        let model = Arc::new(MockModel::new(vec![
+            // Turn 1: Agent A calls handoff to B.
+            ModelResponse {
+                output: vec![json!({
+                    "type": "function_call",
+                    "name": "transfer_to_agent_b",
+                    "call_id": "handoff_call_1",
+                    "arguments": "{}"
+                })],
+                usage: Usage {
+                    requests: 1,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                    ..Usage::default()
+                },
+                response_id: Some("resp_a".to_owned()),
+                request_id: None,
+            },
+            // Turn 2: Agent B produces final output.
+            ModelResponse {
+                output: vec![json!({
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Hello from Agent B!"}]
+                })],
+                usage: Usage {
+                    requests: 1,
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    total_tokens: 30,
+                    ..Usage::default()
+                },
+                response_id: Some("resp_b".to_owned()),
+                request_id: None,
+            },
+        ]));
+
+        let agent_a = Agent::<()>::builder("agent_a")
+            .instructions("You are Agent A.")
+            .handoff(crate::handoffs::Handoff::to_agent("agent_b").build())
+            .build();
+
+        let agent_b = Agent::<()>::builder("agent_b")
+            .instructions("You are Agent B.")
+            .build();
+
+        let mut agents: HashMap<String, &Agent<()>> = HashMap::new();
+        agents.insert("agent_b".to_owned(), &agent_b);
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let hooks: Arc<dyn RunHooks<()>> = Arc::new(TrackingHooks {
+            calls: Arc::clone(&calls),
+        });
+
+        let result =
+            Runner::run_with_agents(&agent_a, &agents, "Hello", (), model, Some(hooks), None)
+                .await
+                .expect("run should succeed");
+
+        assert_eq!(result.final_output, json!("Hello from Agent B!"));
+        assert_eq!(result.last_agent_name, "agent_b");
+
+        // Should have handoff items.
+        let has_handoff_call = result
+            .new_items
+            .iter()
+            .any(|i| matches!(i, RunItem::HandoffCall(_)));
+        let has_handoff_output = result
+            .new_items
+            .iter()
+            .any(|i| matches!(i, RunItem::HandoffOutput(_)));
+        assert!(has_handoff_call, "should have a HandoffCall item");
+        assert!(has_handoff_output, "should have a HandoffOutput item");
+
+        // Verify handoff hook was fired.
+        let recorded = calls.lock().await;
+        assert!(
+            recorded.contains(&"handoff:agent_a->agent_b".to_owned()),
+            "handoff hook should have fired, got: {recorded:?}"
+        );
+        drop(recorded);
+
+        // Usage should be accumulated from both agents.
+        assert_eq!(result.usage.requests, 2);
+        assert_eq!(result.usage.total_tokens, 45);
+    }
+
+    // ---- Test: handoff to unknown agent returns error ----
+
+    #[tokio::test]
+    async fn handoff_to_unknown_agent_returns_error() {
+        let model = Arc::new(MockModel::new(vec![ModelResponse {
+            output: vec![json!({
+                "type": "function_call",
+                "name": "transfer_to_nonexistent",
+                "call_id": "handoff_call_1",
+                "arguments": "{}"
+            })],
+            usage: Usage::default(),
+            response_id: None,
+            request_id: None,
+        }]));
+
+        let agent = Agent::<()>::builder("agent_a")
+            .handoff(crate::handoffs::Handoff::to_agent("nonexistent").build())
+            .build();
+
+        // Registry has no "nonexistent" agent.
+        let agents: HashMap<String, &Agent<()>> = HashMap::new();
+        // We need at least one entry to indicate multi-agent mode.
+        let mut agents_with_dummy = agents;
+        let dummy = Agent::<()>::builder("dummy").build();
+        agents_with_dummy.insert("dummy".to_owned(), &dummy);
+
+        let result =
+            Runner::run_with_agents(&agent, &agents_with_dummy, "Hello", (), model, None, None)
+                .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UserError { message } if message.contains("nonexistent")),
+            "expected UserError about missing agent, got: {err:?}"
+        );
+    }
+
+    // ---- Test: streaming produces events ----
+
+    #[tokio::test]
+    async fn streaming_produces_events() {
+        use tokio_stream::StreamExt;
+
+        // We need a 'static agent for run_streamed.
+        static STREAMING_AGENT: std::sync::LazyLock<Agent<()>> = std::sync::LazyLock::new(|| {
+            Agent::<()>::builder("stream-agent")
+                .instructions("You are a streaming assistant.")
+                .build()
+        });
+
+        let model: Arc<dyn Model> = Arc::new(StreamingMockModel {
+            events: vec![
+                json!({"type": "response.output_text.delta", "delta": "Hello"}),
+                json!({"type": "response.output_text.delta", "delta": " world"}),
+                json!({"type": "message", "content": [{"type": "output_text", "text": "Hello world"}]}),
+            ],
+        });
+
+        let mut result = Runner::run_streamed(&STREAMING_AGENT, "Hi", (), model, None, None);
+
+        let mut stream = result.stream_events();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+
+        // Should have at least the raw response events.
+        assert!(
+            events.len() >= 3,
+            "expected at least 3 events, got {}",
+            events.len()
+        );
+
+        // First events should be raw responses.
+        assert!(matches!(&events[0], StreamEvent::RawResponse(_)));
+        assert!(matches!(&events[1], StreamEvent::RawResponse(_)));
+        assert!(matches!(&events[2], StreamEvent::RawResponse(_)));
+    }
+
+    // ---- Test: streaming cancel works ----
+
+    #[tokio::test]
+    async fn streaming_cancel_works() {
+        use tokio_stream::StreamExt;
+
+        // Slow streaming model that yields events slowly.
+        struct SlowStreamModel;
+
+        #[async_trait]
+        impl Model for SlowStreamModel {
+            async fn get_response(
+                &self,
+                _system_instructions: Option<&str>,
+                _input: &[ResponseInputItem],
+                _model_settings: &ModelSettings,
+                _tools: &[ToolSpec],
+                _output_schema: Option<&OutputSchemaSpec>,
+                _handoffs: &[HandoffToolSpec],
+                _tracing: ModelTracing,
+                _previous_response_id: Option<&str>,
+            ) -> Result<ModelResponse> {
+                Ok(ModelResponse {
+                    output: vec![],
+                    usage: Usage::default(),
+                    response_id: None,
+                    request_id: None,
+                })
+            }
+
+            fn stream_response<'a>(
+                &'a self,
+                _system_instructions: Option<&'a str>,
+                _input: &'a [ResponseInputItem],
+                _model_settings: &'a ModelSettings,
+                _tools: &'a [ToolSpec],
+                _output_schema: Option<&'a OutputSchemaSpec>,
+                _handoffs: &'a [HandoffToolSpec],
+                _tracing: ModelTracing,
+                _previous_response_id: Option<&'a str>,
+            ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+            {
+                // Yield events with delays.
+                Box::pin(async_stream::stream! {
+                    for i in 0..100 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        yield Ok(json!({"type": "delta", "index": i}));
+                    }
+                })
+            }
+        }
+
+        static CANCEL_AGENT: std::sync::LazyLock<Agent<()>> =
+            std::sync::LazyLock::new(|| Agent::<()>::builder("cancel-agent").build());
+
+        let model: Arc<dyn Model> = Arc::new(SlowStreamModel);
+
+        let mut result = Runner::run_streamed(&CANCEL_AGENT, "Hi", (), model, None, None);
+
+        let mut stream = result.stream_events();
+
+        // Read a few events.
+        let first_event = stream.next().await;
+        assert!(first_event.is_some(), "should get at least one event");
+
+        // Cancel the stream.
+        drop(stream);
+        result.cancel();
+
+        // Give the background task time to notice cancellation.
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // The test passes if it completes without hanging.
+    }
+
+    // ---- Test: process_model_response correctly categorizes output items ----
+
+    #[test]
+    fn build_tool_specs_from_agent_with_handoffs() {
+        let agent = Agent::<()>::builder("test")
+            .handoff(crate::handoffs::Handoff::to_agent("billing").build())
+            .build();
+
+        let specs = build_handoff_specs(&agent);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].tool_name, "transfer_to_billing");
     }
 }

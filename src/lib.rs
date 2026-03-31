@@ -61,6 +61,8 @@
 //! | [`handoffs`] | Agent-to-agent handoff support |
 //! | [`items`] | Run items, tool output, and helper utilities |
 //! | [`lifecycle`] | Run and agent lifecycle hook traits |
+//! | [`mcp`] | Model Context Protocol server integration |
+//! | [`memory`] | Session-based conversation history persistence |
 //! | [`models`] | `Model` and `ModelProvider` traits |
 //! | [`result`] | `RunResult` and `RunResultStreaming` |
 //! | [`runner`] | Agent execution loop |
@@ -86,13 +88,27 @@ pub mod guardrail;
 pub mod handoffs;
 pub mod items;
 pub mod lifecycle;
+pub mod mcp;
+pub mod memory;
 pub mod models;
+pub mod prompts;
 pub mod result;
+pub mod retry;
+pub mod run_state;
 pub mod runner;
 pub mod schema;
 pub mod stream_events;
 pub mod tool;
+pub mod tracing_mod;
 pub mod usage;
+
+/// Re-export of the tracing module under a friendlier name.
+///
+/// The module is named `tracing_mod` internally to avoid collision with
+/// the `tracing` crate dependency. Use `openai_agents::tracing_support`
+/// (or `openai_agents::tracing_mod`) to access span helpers and
+/// configuration.
+pub use tracing_mod as tracing_support;
 
 // ---------------------------------------------------------------------------
 // Convenience re-exports — the most commonly used types at the crate root.
@@ -109,12 +125,17 @@ pub use guardrail::{
 pub use handoffs::{Handoff, HandoffInputData};
 pub use items::{InputContent, ItemHelpers, ModelResponse, RunItem, ToolOutput};
 pub use lifecycle::{AgentHooks, RunHooks};
+pub use mcp::{MCPConfig, MCPServer};
+pub use memory::{InMemorySession, Session};
 pub use models::{HandoffToolSpec, Model, ModelProvider, ModelTracing, ToolSpec};
 pub use result::{RunResult, RunResultStreaming};
+pub use retry::RetryPolicy;
+pub use run_state::{CURRENT_SCHEMA_VERSION, NextStep, PendingToolCall, RunState};
 pub use runner::Runner;
 pub use schema::{ensure_strict_json_schema, json_schema_for};
 pub use stream_events::{RunItemEventName, StreamEvent};
 pub use tool::{FunctionTool, FunctionToolResult, Tool, ToolContext, function_tool};
+pub use tracing_mod::TracingConfig;
 pub use usage::Usage;
 
 // ---------------------------------------------------------------------------
