@@ -233,7 +233,7 @@ mod tests {
             _handoffs: &[HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&str>,
-        ) -> crate::Result<ModelResponse> {
+        ) -> Result<ModelResponse> {
             let mut responses = self.responses.lock().await;
             if responses.is_empty() {
                 Ok(ModelResponse {
@@ -260,7 +260,7 @@ mod tests {
             _handoffs: &'a [HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&'a str>,
-        ) -> Pin<Box<dyn Stream<Item = crate::Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+        ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
         {
             Box::pin(tokio_stream::empty())
         }
@@ -283,7 +283,7 @@ mod tests {
             _handoffs: &[HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&str>,
-        ) -> crate::Result<ModelResponse> {
+        ) -> Result<ModelResponse> {
             Ok(ModelResponse {
                 output: vec![],
                 usage: Usage::default(),
@@ -302,9 +302,9 @@ mod tests {
             _handoffs: &'a [HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&'a str>,
-        ) -> Pin<Box<dyn Stream<Item = crate::Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+        ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
         {
-            let events: Vec<crate::Result<crate::items::ResponseStreamEvent>> =
+            let events: Vec<Result<crate::items::ResponseStreamEvent>> =
                 self.events.iter().map(|e| Ok(e.clone())).collect();
             Box::pin(tokio_stream::iter(events))
         }
@@ -985,7 +985,7 @@ mod tests {
                 _handoffs: &[HandoffToolSpec],
                 _tracing: ModelTracing,
                 _previous_response_id: Option<&str>,
-            ) -> crate::Result<ModelResponse> {
+            ) -> Result<ModelResponse> {
                 Ok(ModelResponse {
                     output: vec![],
                     usage: Usage::default(),
@@ -1004,11 +1004,8 @@ mod tests {
                 _handoffs: &'a [HandoffToolSpec],
                 _tracing: ModelTracing,
                 _previous_response_id: Option<&'a str>,
-            ) -> Pin<
-                Box<
-                    dyn Stream<Item = crate::Result<crate::items::ResponseStreamEvent>> + Send + 'a,
-                >,
-            > {
+            ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+            {
                 // Yield events with delays.
                 Box::pin(async_stream::stream! {
                     for i in 0..100 {
