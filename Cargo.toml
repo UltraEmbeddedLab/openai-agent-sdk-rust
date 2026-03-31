@@ -52,6 +52,15 @@ tokio-stream = "0.1"
 # Async stream generators
 async-stream = "0.3"
 
+# SQLite (optional, for sqlite-session feature)
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+# OpenTelemetry OTLP export (optional, for tracing-otlp feature)
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.13"
@@ -65,8 +74,8 @@ temp-env = "0.3"
 default = []
 mcp = []
 voice = []
-tracing-otlp = ["tracing-subscriber/registry"]
-sqlite-session = []
+tracing-otlp = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "tracing-opentelemetry", "tracing-subscriber/registry"]
+sqlite-session = ["rusqlite"]
 
 [[bench]]
 name = "runner"

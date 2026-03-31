@@ -155,6 +155,44 @@ impl<C: Send + Sync + 'static> FunctionTool<C> {
     pub async fn invoke(&self, ctx: ToolContext<C>, args_json: String) -> Result<ToolOutput> {
         (self.invoke_fn)(ctx, args_json).await
     }
+
+    /// Create a `FunctionTool` that wraps an MCP server tool.
+    ///
+    /// This is used internally by [`MCPServer::list_tools`](crate::mcp::MCPServer::list_tools)
+    /// to convert MCP tool definitions into SDK tools. The resulting tool has a
+    /// no-op invoke function because MCP tool calls are dispatched through
+    /// [`MCPServer::call_tool`](crate::mcp::MCPServer::call_tool) instead.
+    #[must_use]
+    pub(crate) fn mcp_tool(
+        name: String,
+        description: String,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        let tool_name = name.clone();
+        let invoke_fn: InvokeFn<C> = Arc::new(move |_ctx, _args_json| {
+            let name = tool_name.clone();
+            Box::pin(async move {
+                // MCP tools are not invoked through this function. The runner
+                // dispatches MCP tool calls via MCPServer::call_tool directly.
+                Err(AgentError::UserError {
+                    message: format!(
+                        "MCP tool '{name}' cannot be invoked directly. \
+                         Use MCPServer::call_tool instead."
+                    ),
+                })
+            })
+        });
+
+        Self {
+            name,
+            description,
+            params_json_schema: input_schema,
+            strict_json_schema: false,
+            is_enabled: true,
+            needs_approval: false,
+            invoke_fn,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

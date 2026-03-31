@@ -2,8 +2,8 @@
 //!
 //! This module provides support for connecting to MCP servers and using their
 //! tools within agent workflows. MCP servers expose tools over a standardised
-//! protocol, and this module converts them into the SDK's [`Tool`](crate::tool::Tool)
-//! type so they can be used seamlessly by agents.
+//! JSON-RPC 2.0 protocol, and this module converts them into the SDK's
+//! [`Tool`](crate::tool::Tool) type so they can be used seamlessly by agents.
 //!
 //! Enable the **`mcp`** feature flag to use this module.
 //!
@@ -14,6 +14,7 @@
 //! * [`MCPTransport`] — the transport mechanism (stdio subprocess or SSE/HTTP).
 //! * [`MCPConfig`] — per-agent MCP configuration (error handling, timeouts).
 //! * [`ToolFilter`] — controls which MCP tools are exposed to the agent.
+//! * [`protocol`] — JSON-RPC 2.0 wire types and MCP-specific message types.
 //!
 //! # Example
 //!
@@ -31,9 +32,14 @@
 //! ```
 
 pub mod config;
+pub mod protocol;
 pub mod server;
 pub mod util;
 
 pub use config::MCPConfig;
+pub use protocol::{
+    ClientInfo, InitializeParams, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, ListToolsResult, McpContent, McpToolDef, McpToolResult,
+};
 pub use server::{MCPServer, MCPServerConfig, MCPTransport};
 pub use util::{ToolFilter, ToolFilterContext, ToolFilterStatic};

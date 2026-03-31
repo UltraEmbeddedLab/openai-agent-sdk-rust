@@ -29,27 +29,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::json;
-use tokio::sync::RwLock;
-
-use crate::agent::{Agent, ToolUseBehavior};
+use crate::agent::Agent;
 use crate::config::{DEFAULT_MAX_TURNS, RunConfig};
-use crate::context::RunContextWrapper;
-use crate::error::{AgentError, Result};
-use crate::guardrail::{InputGuardrailResult, OutputGuardrailResult};
-use crate::items::{
-    HandoffCallItem, HandoffOutputItem, InputContent, ItemHelpers, MessageOutputItem,
-    ModelResponse, ReasoningItem, ResponseInputItem, RunItem, ToolCallItem, ToolCallOutputItem,
-    ToolOutput,
-};
+use crate::error::Result;
+use crate::items::InputContent;
 use crate::lifecycle::RunHooks;
-use crate::models::{HandoffToolSpec, Model, ModelTracing, OutputSchemaSpec, ToolSpec};
-use crate::prompts;
+use crate::models::Model;
 use crate::result::{RunResult, RunResultStreaming};
-use crate::retry::RetryPolicy;
-use crate::stream_events::{RunItemEventName, StreamEvent};
-use crate::tool::{FunctionTool, Tool, ToolContext};
-use crate::usage::Usage;
+use crate::run_internal::run_loop;
 
 /// The main entry point for running agents.
 ///
@@ -62,7 +49,7 @@ use crate::usage::Usage;
 /// 4. Call the model.
 /// 5. Process the response: extract messages, tool calls, handoffs, and reasoning.
 /// 6. Execute function tools and collect their outputs.
-/// 7. Determine the next step based on the agent's [`ToolUseBehavior`].
+/// 7. Determine the next step based on the agent's [`ToolUseBehavior`](crate::agent::ToolUseBehavior).
 /// 8. Run output guardrails on the final output.
 /// 9. Fire lifecycle hooks at each step.
 /// 10. Repeat until a final output is produced or the turn limit is reached.
@@ -76,15 +63,14 @@ impl Runner {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::MaxTurnsExceeded`] if the loop exceeds the configured
-    /// maximum number of turns. Also propagates errors from the model, tools,
-    /// guardrails, or lifecycle hooks.
+    /// Returns [`AgentError::MaxTurnsExceeded`](crate::error::AgentError::MaxTurnsExceeded)
+    /// if the loop exceeds the configured maximum number of turns. Also propagates
+    /// errors from the model, tools, guardrails, or lifecycle hooks.
     ///
     /// # Panics
     ///
     /// Panics if the internal response list is unexpectedly empty after a model call.
     /// This should never occur in practice.
-    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     pub async fn run_with_model<C: Send + Sync + 'static>(
         agent: &Agent<C>,
         input: impl Into<InputContent>,
@@ -94,7 +80,7 @@ impl Runner {
         config: Option<RunConfig>,
     ) -> Result<RunResult> {
         // Delegate to the multi-agent run with no agent registry.
-        Self::run_internal(
+        run_loop::run_internal(
             agent,
             &HashMap::new(),
             input.into(),
@@ -114,9 +100,9 @@ impl Runner {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::UserError`] if a handoff target agent is not found in
-    /// the registry. Also propagates all errors from [`run_with_model`](Self::run_with_model).
-    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    /// Returns [`AgentError::UserError`](crate::error::AgentError::UserError) if a
+    /// handoff target agent is not found in the registry. Also propagates all errors
+    /// from [`run_with_model`](Self::run_with_model).
     pub async fn run_with_agents<C: Send + Sync + 'static>(
         starting_agent: &Agent<C>,
         agents: &HashMap<String, &Agent<C>>,
@@ -126,7 +112,7 @@ impl Runner {
         hooks: Option<Arc<dyn RunHooks<C>>>,
         config: Option<RunConfig>,
     ) -> Result<RunResult> {
-        Self::run_internal(
+        run_loop::run_internal(
             starting_agent,
             agents,
             input.into(),
@@ -176,826 +162,12 @@ impl Runner {
             cancel_tx,
         );
 
-        tokio::spawn(Self::streaming_loop(
+        tokio::spawn(run_loop::streaming_loop(
             agent, input, context, model, hooks, config, event_tx, cancel_rx,
         ));
 
         result
     }
-
-    /// Internal method that implements the full agent loop with optional multi-agent support.
-    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
-    async fn run_internal<C: Send + Sync + 'static>(
-        starting_agent: &Agent<C>,
-        agents: &HashMap<String, &Agent<C>>,
-        input: InputContent,
-        context: C,
-        model: Arc<dyn Model>,
-        hooks: Option<Arc<dyn RunHooks<C>>>,
-        config: Option<RunConfig>,
-    ) -> Result<RunResult> {
-        let config = config.unwrap_or_default();
-        let ctx = Arc::new(RwLock::new(RunContextWrapper::new(context)));
-        let max_turns = config.max_turns;
-
-        let mut current_agent = starting_agent;
-        let mut current_input = ItemHelpers::input_to_new_input_list(&input);
-        let mut all_items: Vec<RunItem> = Vec::new();
-        let mut all_responses: Vec<ModelResponse> = Vec::new();
-        let mut input_guardrail_results: Vec<InputGuardrailResult> = Vec::new();
-        let mut output_guardrail_results: Vec<OutputGuardrailResult> = Vec::new();
-        let mut total_usage = Usage::default();
-
-        let tracing = if config.tracing_disabled {
-            ModelTracing::Disabled
-        } else {
-            ModelTracing::Enabled
-        };
-
-        let retry_policy = RetryPolicy::none();
-
-        for turn in 0..max_turns {
-            // 1. Fire agent start hooks.
-            {
-                let ctx_read = ctx.read().await;
-                if let Some(ref hooks) = hooks {
-                    hooks.on_agent_start(&ctx_read, &current_agent.name).await;
-                }
-                if let Some(ref agent_hooks) = current_agent.hooks {
-                    agent_hooks.on_start(&ctx_read).await;
-                }
-            }
-
-            // 2. Get agent instructions and build system prompt.
-            let system_prompt = {
-                let ctx_read = ctx.read().await;
-                let raw_instructions = current_agent.get_instructions(&ctx_read).await?;
-                let tool_specs = build_tool_specs(current_agent);
-                let handoff_specs_for_prompt = &current_agent.handoffs;
-                prompts::build_system_prompt(
-                    raw_instructions.as_deref(),
-                    &tool_specs,
-                    handoff_specs_for_prompt,
-                )
-            };
-
-            // 3. Set the turn input on the context.
-            {
-                let mut ctx_write = ctx.write().await;
-                ctx_write.set_turn_input(current_input.clone());
-            }
-
-            // 4. Build tool specs and handoff specs.
-            let tool_specs = build_tool_specs(current_agent);
-            let handoff_specs = build_handoff_specs(current_agent);
-            let output_schema_spec = current_agent
-                .output_type
-                .as_ref()
-                .map(|s| OutputSchemaSpec {
-                    json_schema: s.json_schema.clone(),
-                    strict: s.strict,
-                });
-
-            // 5. Run input guardrails (first turn only).
-            if turn == 0 {
-                let ctx_read = ctx.read().await;
-                for guardrail in &current_agent.input_guardrails {
-                    let result = guardrail
-                        .run(&ctx_read, &current_agent.name, &input)
-                        .await?;
-                    input_guardrail_results.push(result);
-                }
-            }
-
-            // 6. Fire LLM start hooks.
-            {
-                let ctx_read = ctx.read().await;
-                if let Some(ref hooks) = hooks {
-                    hooks
-                        .on_llm_start(
-                            &ctx_read,
-                            &current_agent.name,
-                            system_prompt.as_deref(),
-                            &current_input,
-                        )
-                        .await;
-                }
-                if let Some(ref agent_hooks) = current_agent.hooks {
-                    agent_hooks
-                        .on_llm_start(&ctx_read, system_prompt.as_deref(), &current_input)
-                        .await;
-                }
-            }
-
-            // Resolve model settings.
-            let model_settings = current_agent
-                .model_settings
-                .resolve(config.model_settings.as_ref());
-
-            // 7. Call the model with retry support.
-            let sys_prompt_ref = system_prompt.as_deref();
-            let input_ref = &current_input;
-            let tool_specs_ref = &tool_specs;
-            let output_schema_ref = output_schema_spec.as_ref();
-            let handoff_specs_ref = &handoff_specs;
-            let prev_resp_id: Option<&str> = None;
-
-            let response = retry_policy
-                .execute(|| {
-                    model.get_response(
-                        sys_prompt_ref,
-                        input_ref,
-                        &model_settings,
-                        tool_specs_ref,
-                        output_schema_ref,
-                        handoff_specs_ref,
-                        tracing,
-                        prev_resp_id,
-                    )
-                })
-                .await?;
-
-            // 8. Accumulate usage.
-            total_usage.add(&response.usage);
-            {
-                let mut ctx_write = ctx.write().await;
-                ctx_write.add_usage(&response.usage);
-            }
-
-            // 9. Fire LLM end hooks.
-            {
-                let ctx_read = ctx.read().await;
-                if let Some(ref hooks) = hooks {
-                    hooks
-                        .on_llm_end(&ctx_read, &current_agent.name, &response)
-                        .await;
-                }
-                if let Some(ref agent_hooks) = current_agent.hooks {
-                    agent_hooks.on_llm_end(&ctx_read, &response).await;
-                }
-            }
-
-            // Track previous response ID.
-            //
-            // Note: `previous_response_id` is tracked here but currently passed as
-            // `None` to the model because the runner operates in stateless mode —
-            // it always sends the full conversation history as `input`. Using
-            // `previous_response_id` with the Responses API in stateful mode requires
-            // sending only the *delta* items (tool outputs) rather than the full
-            // history, which is not yet implemented.
-            let _ = &response.response_id; // suppress unused-variable warning
-
-            // 10. Process the model response.
-            let processed = process_model_response(current_agent, &response);
-            let mut turn_items = processed.new_items;
-            let function_calls = processed.function_calls;
-            let handoff_calls = processed.handoff_calls;
-
-            // 11. Execute function tool calls.
-            let mut tool_outputs: Vec<ResponseInputItem> = Vec::new();
-            let mut had_tool_calls = false;
-            let mut stop_tool_names: Vec<String> = Vec::new();
-
-            for fc in &function_calls {
-                had_tool_calls = true;
-                let tool_name = &fc.name;
-                let call_id = &fc.call_id;
-                let arguments = &fc.arguments;
-
-                // Fire tool start hooks.
-                {
-                    let ctx_read = ctx.read().await;
-                    if let Some(ref hooks) = hooks {
-                        hooks
-                            .on_tool_start(&ctx_read, &current_agent.name, tool_name)
-                            .await;
-                    }
-                    if let Some(ref agent_hooks) = current_agent.hooks {
-                        agent_hooks.on_tool_start(&ctx_read, tool_name).await;
-                    }
-                }
-
-                // Find the matching function tool.
-                let function_tool = find_function_tool(current_agent, tool_name);
-
-                let output = if let Some(ft) = function_tool {
-                    let tool_ctx = ToolContext {
-                        context: Arc::clone(&ctx),
-                        tool_name: tool_name.clone(),
-                        tool_call_id: call_id.clone(),
-                    };
-                    match ft.invoke(tool_ctx, arguments.clone()).await {
-                        Ok(out) => out,
-                        Err(e) => ToolOutput::Text(format!("Error: {e}")),
-                    }
-                } else {
-                    ToolOutput::Text(format!("Error: tool '{tool_name}' not found"))
-                };
-
-                let output_text = match &output {
-                    ToolOutput::Text(s) => s.clone(),
-                    _ => String::from("<non-text output>"),
-                };
-
-                // Fire tool end hooks.
-                {
-                    let ctx_read = ctx.read().await;
-                    if let Some(ref hooks) = hooks {
-                        hooks
-                            .on_tool_end(&ctx_read, &current_agent.name, tool_name, &output_text)
-                            .await;
-                    }
-                    if let Some(ref agent_hooks) = current_agent.hooks {
-                        agent_hooks
-                            .on_tool_end(&ctx_read, tool_name, &output_text)
-                            .await;
-                    }
-                }
-
-                // Build the tool call output item.
-                let output_item = ItemHelpers::tool_call_output_item(call_id, &output);
-                tool_outputs.push(output_item.clone());
-
-                turn_items.push(RunItem::ToolCallOutput(ToolCallOutputItem {
-                    agent_name: current_agent.name.clone(),
-                    raw_item: output_item,
-                    output: serde_json::to_value(&output).unwrap_or(json!(null)),
-                }));
-
-                stop_tool_names.push(tool_name.clone());
-            }
-
-            // 12. Handle handoffs.
-            if let Some(handoff_call) = handoff_calls.first() {
-                // Find the matching handoff.
-                let handoff = current_agent
-                    .handoffs
-                    .iter()
-                    .find(|h| h.tool_name == handoff_call.tool_name);
-
-                if let Some(h) = handoff {
-                    let ctx_read = ctx.read().await;
-                    let target_agent_name =
-                        h.invoke(&ctx_read, handoff_call.arguments.clone()).await?;
-
-                    let transfer_msg = h.get_transfer_message(&current_agent.name);
-                    let handoff_output_raw = json!({
-                        "type": "function_call_output",
-                        "call_id": handoff_call.call_id,
-                        "output": transfer_msg,
-                    });
-
-                    turn_items.push(RunItem::HandoffOutput(HandoffOutputItem {
-                        agent_name: current_agent.name.clone(),
-                        raw_item: handoff_output_raw.clone(),
-                        source_agent_name: current_agent.name.clone(),
-                        target_agent_name: target_agent_name.clone(),
-                    }));
-
-                    // Fire handoff hooks.
-                    if let Some(ref hooks) = hooks {
-                        hooks
-                            .on_handoff(&ctx_read, &current_agent.name, &target_agent_name)
-                            .await;
-                    }
-
-                    // Collect items before switching agent.
-                    all_items.extend(turn_items);
-                    all_responses.push(response);
-
-                    // Look up the target agent in the registry.
-                    if let Some(target_agent) = agents.get(target_agent_name.as_str()) {
-                        current_agent = target_agent;
-
-                        // Build the next input: current input + response output + handoff output.
-                        let last_response =
-                            all_responses.last().ok_or_else(|| AgentError::UserError {
-                                message: "internal error: no model responses after model call"
-                                    .to_string(),
-                            })?;
-                        let mut next_input = current_input.clone();
-                        next_input.extend(last_response.to_input_items());
-                        next_input.push(handoff_output_raw);
-                        current_input = next_input;
-
-                        continue;
-                    }
-
-                    // If the registry is empty (single-agent mode), return as before.
-                    if agents.is_empty() {
-                        let final_output = extract_final_output(&all_items, &all_responses);
-
-                        // Run output guardrails.
-                        {
-                            let ctx_read2 = ctx.read().await;
-                            for guardrail in &current_agent.output_guardrails {
-                                let result = guardrail
-                                    .run(&ctx_read2, &current_agent.name, &final_output)
-                                    .await?;
-                                output_guardrail_results.push(result);
-                            }
-                        }
-
-                        // Fire agent end hooks.
-                        {
-                            let ctx_read2 = ctx.read().await;
-                            if let Some(ref hooks) = hooks {
-                                hooks
-                                    .on_agent_end(&ctx_read2, &current_agent.name, &final_output)
-                                    .await;
-                            }
-                            if let Some(ref agent_hooks) = current_agent.hooks {
-                                agent_hooks.on_end(&ctx_read2, &final_output).await;
-                            }
-                        }
-
-                        return Ok(RunResult {
-                            input: input.clone(),
-                            new_items: all_items,
-                            raw_responses: all_responses,
-                            final_output,
-                            last_agent_name: current_agent.name.clone(),
-                            input_guardrail_results,
-                            output_guardrail_results,
-                            usage: total_usage,
-                        });
-                    }
-
-                    // Agent not found in registry.
-                    return Err(AgentError::UserError {
-                        message: format!(
-                            "Handoff target agent '{target_agent_name}' not found in registry"
-                        ),
-                    });
-                }
-            }
-
-            // 13. Collect items and response.
-            all_items.extend(turn_items);
-            all_responses.push(response);
-
-            // 14. Determine next step based on ToolUseBehavior.
-            let has_handoff = !handoff_calls.is_empty();
-
-            let should_stop = match &current_agent.tool_use_behavior {
-                ToolUseBehavior::RunLlmAgain => {
-                    // Stop if there were no tool calls and no handoffs.
-                    !had_tool_calls && !has_handoff
-                }
-                ToolUseBehavior::StopOnFirstTool => {
-                    // Always stop after the first turn (tool call or not).
-                    true
-                }
-                ToolUseBehavior::StopAtTools(stop_tools) => {
-                    // Stop if any of the called tools are in the stop list.
-                    let should_stop_at_tool =
-                        stop_tool_names.iter().any(|name| stop_tools.contains(name));
-                    if should_stop_at_tool {
-                        true
-                    } else {
-                        // If no tool calls and no handoff, also stop (final message).
-                        !had_tool_calls && !has_handoff
-                    }
-                }
-            };
-
-            if should_stop || has_handoff {
-                // Build the final output.
-                let final_output = extract_final_output(&all_items, &all_responses);
-
-                // Run output guardrails.
-                {
-                    let ctx_read = ctx.read().await;
-                    for guardrail in &current_agent.output_guardrails {
-                        let result = guardrail
-                            .run(&ctx_read, &current_agent.name, &final_output)
-                            .await?;
-                        output_guardrail_results.push(result);
-                    }
-                }
-
-                // Fire agent end hooks.
-                {
-                    let ctx_read = ctx.read().await;
-                    if let Some(ref hooks) = hooks {
-                        hooks
-                            .on_agent_end(&ctx_read, &current_agent.name, &final_output)
-                            .await;
-                    }
-                    if let Some(ref agent_hooks) = current_agent.hooks {
-                        agent_hooks.on_end(&ctx_read, &final_output).await;
-                    }
-                }
-
-                return Ok(RunResult {
-                    input: input.clone(),
-                    new_items: all_items,
-                    raw_responses: all_responses,
-                    final_output,
-                    last_agent_name: current_agent.name.clone(),
-                    input_guardrail_results,
-                    output_guardrail_results,
-                    usage: total_usage,
-                });
-            }
-
-            // 15. If we have tool calls and should continue, append tool outputs to input.
-            let last_response = all_responses.last().ok_or_else(|| AgentError::UserError {
-                message: "internal error: no model responses recorded after model call".to_string(),
-            })?;
-            let mut next_input = current_input.clone();
-            next_input.extend(last_response.to_input_items());
-            next_input.extend(tool_outputs);
-            current_input = next_input;
-        }
-
-        Err(AgentError::MaxTurnsExceeded { max_turns })
-    }
-
-    /// Background task that drives the streaming agent loop.
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-    async fn streaming_loop<C: Send + Sync + 'static>(
-        agent: &'static Agent<C>,
-        input: InputContent,
-        context: C,
-        model: Arc<dyn Model>,
-        hooks: Option<Arc<dyn RunHooks<C>>>,
-        config: Option<RunConfig>,
-        event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
-        mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
-    ) {
-        let config = config.unwrap_or_default();
-        let ctx = Arc::new(RwLock::new(RunContextWrapper::new(context)));
-        let max_turns = config.max_turns;
-
-        let mut current_input = ItemHelpers::input_to_new_input_list(&input);
-
-        let tracing = if config.tracing_disabled {
-            ModelTracing::Disabled
-        } else {
-            ModelTracing::Enabled
-        };
-
-        for _turn in 0..max_turns {
-            // Check for cancellation.
-            if cancel_rx.try_recv().is_ok() {
-                return;
-            }
-
-            // Get system prompt via prompts module.
-            let raw_instructions = {
-                let ctx_read = ctx.read().await;
-                let Ok(instr) = agent.get_instructions(&ctx_read).await else {
-                    return;
-                };
-                instr
-            };
-            let tool_specs_for_prompt = build_tool_specs(agent);
-            let system_prompt = prompts::build_system_prompt(
-                raw_instructions.as_deref(),
-                &tool_specs_for_prompt,
-                &agent.handoffs,
-            );
-
-            let tool_specs = build_tool_specs(agent);
-            let handoff_specs = build_handoff_specs(agent);
-            let output_schema_spec = agent.output_type.as_ref().map(|s| OutputSchemaSpec {
-                json_schema: s.json_schema.clone(),
-                strict: s.strict,
-            });
-
-            let model_settings = agent.model_settings.resolve(config.model_settings.as_ref());
-
-            // Fire agent start hooks.
-            {
-                let ctx_read = ctx.read().await;
-                if let Some(ref hooks) = hooks {
-                    hooks.on_agent_start(&ctx_read, &agent.name).await;
-                }
-            }
-
-            // Stream model response in its own scope so borrows are released.
-            let collected_output = {
-                use tokio_stream::StreamExt;
-
-                let mut stream = model.stream_response(
-                    system_prompt.as_deref(),
-                    &current_input,
-                    &model_settings,
-                    &tool_specs,
-                    output_schema_spec.as_ref(),
-                    &handoff_specs,
-                    tracing,
-                    None,
-                );
-
-                let mut collected: Vec<serde_json::Value> = Vec::new();
-
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut cancel_rx => {
-                            return;
-                        }
-                        maybe_event = stream.next() => {
-                            match maybe_event {
-                                Some(Ok(event)) => {
-                                    collected.push(event.clone());
-                                    // Send raw event.
-                                    if event_tx.send(StreamEvent::RawResponse(event)).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                Some(Err(_)) => {
-                                    return;
-                                }
-                                None => {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                collected
-            };
-
-            // Process collected events into run items.
-            let model_response = ModelResponse {
-                output: collected_output,
-                usage: Usage::default(),
-                response_id: None,
-                request_id: None,
-            };
-
-            let processed = process_model_response(agent, &model_response);
-
-            for item in &processed.new_items {
-                let event_name = match item {
-                    RunItem::MessageOutput(_) => RunItemEventName::MessageOutputCreated,
-                    RunItem::HandoffCall(_) => RunItemEventName::HandoffRequested,
-                    RunItem::HandoffOutput(_) => RunItemEventName::HandoffOccurred,
-                    RunItem::ToolCall(_) => RunItemEventName::ToolCalled,
-                    RunItem::ToolCallOutput(_) => RunItemEventName::ToolOutput,
-                    RunItem::Reasoning(_) => RunItemEventName::ReasoningItemCreated,
-                };
-
-                if event_tx
-                    .send(StreamEvent::RunItemCreated {
-                        name: event_name,
-                        item: item.clone(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-
-            // If there are no tool calls and no handoff calls, this is the final turn.
-            if processed.function_calls.is_empty() && processed.handoff_calls.is_empty() {
-                return;
-            }
-
-            // Execute function tool calls and append to input.
-            let mut tool_outputs_for_input: Vec<ResponseInputItem> = Vec::new();
-            for fc in &processed.function_calls {
-                let function_tool = find_function_tool(agent, &fc.name);
-                let output = if let Some(ft) = function_tool {
-                    let tool_ctx = ToolContext {
-                        context: Arc::clone(&ctx),
-                        tool_name: fc.name.clone(),
-                        tool_call_id: fc.call_id.clone(),
-                    };
-                    match ft.invoke(tool_ctx, fc.arguments.clone()).await {
-                        Ok(out) => out,
-                        Err(e) => ToolOutput::Text(format!("Error: {e}")),
-                    }
-                } else {
-                    ToolOutput::Text(format!("Error: tool '{}' not found", fc.name))
-                };
-                let output_item = ItemHelpers::tool_call_output_item(&fc.call_id, &output);
-                tool_outputs_for_input.push(output_item);
-            }
-
-            let mut next_input = current_input;
-            next_input.extend(model_response.to_input_items());
-            next_input.extend(tool_outputs_for_input);
-            current_input = next_input;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Internal helper types and functions
-// ---------------------------------------------------------------------------
-
-/// A parsed function call from the model response.
-struct ParsedFunctionCall {
-    /// The tool name.
-    name: String,
-    /// The call ID.
-    call_id: String,
-    /// The raw JSON arguments string.
-    arguments: String,
-}
-
-/// A parsed handoff call from the model response.
-struct ParsedHandoffCall {
-    /// The handoff tool name.
-    tool_name: String,
-    /// The call ID.
-    call_id: String,
-    /// The raw JSON arguments string.
-    arguments: String,
-}
-
-/// Result of processing a model response.
-struct ProcessedResponse {
-    /// New run items extracted from the response.
-    new_items: Vec<RunItem>,
-    /// Function tool calls to execute.
-    function_calls: Vec<ParsedFunctionCall>,
-    /// Handoff calls to process.
-    handoff_calls: Vec<ParsedHandoffCall>,
-}
-
-/// Build tool specifications from an agent's tools.
-fn build_tool_specs<C: Send + Sync + 'static>(agent: &Agent<C>) -> Vec<ToolSpec> {
-    agent
-        .tools
-        .iter()
-        .map(|tool| match tool {
-            Tool::Function(f) => ToolSpec {
-                name: f.name.clone(),
-                description: f.description.clone(),
-                params_json_schema: f.params_json_schema.clone(),
-                strict: f.strict_json_schema,
-            },
-            Tool::WebSearch(_) => ToolSpec {
-                name: "web_search".into(),
-                description: "Search the web for information.".into(),
-                params_json_schema: json!({}),
-                strict: false,
-            },
-            Tool::FileSearch(_) => ToolSpec {
-                name: "file_search".into(),
-                description: "Search over files in vector stores.".into(),
-                params_json_schema: json!({}),
-                strict: false,
-            },
-            Tool::CodeInterpreter(_) => ToolSpec {
-                name: "code_interpreter".into(),
-                description: "Execute code in a sandboxed environment.".into(),
-                params_json_schema: json!({}),
-                strict: false,
-            },
-        })
-        .collect()
-}
-
-/// Build handoff tool specifications from an agent's handoffs.
-fn build_handoff_specs<C: Send + Sync + 'static>(agent: &Agent<C>) -> Vec<HandoffToolSpec> {
-    agent
-        .handoffs
-        .iter()
-        .map(|h| HandoffToolSpec {
-            tool_name: h.tool_name.clone(),
-            tool_description: h.tool_description.clone(),
-            input_json_schema: h.input_json_schema.clone(),
-            strict: h.strict_json_schema,
-        })
-        .collect()
-}
-
-/// Process a model response, extracting run items, function calls, and handoff calls.
-fn process_model_response<C: Send + Sync + 'static>(
-    agent: &Agent<C>,
-    response: &ModelResponse,
-) -> ProcessedResponse {
-    let mut new_items = Vec::new();
-    let mut function_calls = Vec::new();
-    let mut handoff_calls = Vec::new();
-
-    let handoff_names: Vec<&str> = agent
-        .handoffs
-        .iter()
-        .map(|h| h.tool_name.as_str())
-        .collect();
-
-    for output in &response.output {
-        let output_type = output
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-
-        match output_type {
-            "message" => {
-                new_items.push(RunItem::MessageOutput(MessageOutputItem {
-                    agent_name: agent.name.clone(),
-                    raw_item: output.clone(),
-                }));
-            }
-            "function_call" => {
-                let name = output
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                let call_id = output
-                    .get("call_id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                let arguments = output
-                    .get("arguments")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("{}")
-                    .to_owned();
-
-                if handoff_names.contains(&name.as_str()) {
-                    // This is a handoff call.
-                    new_items.push(RunItem::HandoffCall(HandoffCallItem {
-                        agent_name: agent.name.clone(),
-                        raw_item: output.clone(),
-                    }));
-                    handoff_calls.push(ParsedHandoffCall {
-                        tool_name: name,
-                        call_id,
-                        arguments,
-                    });
-                } else {
-                    // This is a function tool call.
-                    new_items.push(RunItem::ToolCall(ToolCallItem {
-                        agent_name: agent.name.clone(),
-                        raw_item: output.clone(),
-                    }));
-                    function_calls.push(ParsedFunctionCall {
-                        name,
-                        call_id,
-                        arguments,
-                    });
-                }
-            }
-            "reasoning" => {
-                new_items.push(RunItem::Reasoning(ReasoningItem {
-                    agent_name: agent.name.clone(),
-                    raw_item: output.clone(),
-                }));
-            }
-            _ => {
-                // Unknown output type; skip silently.
-            }
-        }
-    }
-
-    ProcessedResponse {
-        new_items,
-        function_calls,
-        handoff_calls,
-    }
-}
-
-/// Find a function tool by name in the agent's tool list.
-fn find_function_tool<'a, C: Send + Sync + 'static>(
-    agent: &'a Agent<C>,
-    tool_name: &str,
-) -> Option<&'a FunctionTool<C>> {
-    agent.tools.iter().find_map(|t| {
-        if let Tool::Function(f) = t {
-            if f.name == tool_name {
-                return Some(f);
-            }
-        }
-        None
-    })
-}
-
-/// Extract the final output from the run items and model responses.
-///
-/// Looks for the last message output text. If no text is found, returns `json!(null)`.
-/// If the extracted text parses as valid JSON, the parsed value is returned so that
-/// structured-output responses (which the model emits as a JSON string in the text
-/// field) are not double-encoded.
-fn extract_final_output(items: &[RunItem], _responses: &[ModelResponse]) -> serde_json::Value {
-    // Walk backwards to find the last message output.
-    for item in items.iter().rev() {
-        if let RunItem::MessageOutput(msg) = item {
-            if let Some(text) = ItemHelpers::extract_text(&msg.raw_item) {
-                // Attempt to parse as JSON to handle structured-output responses.
-                // If the text is valid JSON (object or array), return the parsed value.
-                // Otherwise wrap it as a JSON string, which is the normal plain-text case.
-                let trimmed = text.trim();
-                if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                    if let Ok(parsed) = serde_json::from_str(trimmed) {
-                        return parsed;
-                    }
-                }
-                return serde_json::Value::String(text);
-            }
-        }
-    }
-    json!(null)
 }
 
 #[cfg(test)]
@@ -1004,8 +176,9 @@ mod tests {
     use crate::agent::Agent;
     use crate::config::{ModelSettings, RunConfig};
     use crate::context::RunContextWrapper;
+    use crate::error::AgentError;
     use crate::guardrail::{GuardrailFunctionOutput, InputGuardrail, OutputGuardrail};
-    use crate::items::ModelResponse;
+    use crate::items::{ModelResponse, ResponseInputItem, RunItem};
     use crate::lifecycle::RunHooks;
     use crate::models::{HandoffToolSpec, Model, ModelTracing, OutputSchemaSpec, ToolSpec};
     use crate::usage::Usage;
@@ -1060,7 +233,7 @@ mod tests {
             _handoffs: &[HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&str>,
-        ) -> Result<ModelResponse> {
+        ) -> crate::Result<ModelResponse> {
             let mut responses = self.responses.lock().await;
             if responses.is_empty() {
                 Ok(ModelResponse {
@@ -1087,7 +260,7 @@ mod tests {
             _handoffs: &'a [HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&'a str>,
-        ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+        ) -> Pin<Box<dyn Stream<Item = crate::Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
         {
             Box::pin(tokio_stream::empty())
         }
@@ -1110,7 +283,7 @@ mod tests {
             _handoffs: &[HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&str>,
-        ) -> Result<ModelResponse> {
+        ) -> crate::Result<ModelResponse> {
             Ok(ModelResponse {
                 output: vec![],
                 usage: Usage::default(),
@@ -1129,9 +302,9 @@ mod tests {
             _handoffs: &'a [HandoffToolSpec],
             _tracing: ModelTracing,
             _previous_response_id: Option<&'a str>,
-        ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
+        ) -> Pin<Box<dyn Stream<Item = crate::Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
         {
-            let events: Vec<Result<crate::items::ResponseStreamEvent>> =
+            let events: Vec<crate::Result<crate::items::ResponseStreamEvent>> =
                 self.events.iter().map(|e| Ok(e.clone())).collect();
             Box::pin(tokio_stream::iter(events))
         }
@@ -1161,7 +334,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_and_response_cycle() {
-        use crate::tool::{ToolContext, function_tool};
+        use crate::items::ToolOutput;
+        use crate::tool::{Tool, ToolContext, function_tool};
         use schemars::JsonSchema;
         use serde::Deserialize;
 
@@ -1509,125 +683,13 @@ mod tests {
         assert_eq!(result.final_output, json!("Here is my answer."));
     }
 
-    // ---- Test: process_model_response correctly categorizes output items ----
-
-    #[test]
-    fn process_model_response_categorizes_items() {
-        let agent = Agent::<()>::builder("test")
-            .handoff(crate::handoffs::Handoff::to_agent("other").build())
-            .build();
-
-        let response = ModelResponse {
-            output: vec![
-                json!({"type": "message", "content": [{"type": "output_text", "text": "hi"}]}),
-                json!({"type": "function_call", "name": "add", "call_id": "c1", "arguments": "{}"}),
-                json!({"type": "function_call", "name": "transfer_to_other", "call_id": "c2", "arguments": "{}"}),
-                json!({"type": "reasoning", "text": "thinking"}),
-            ],
-            usage: Usage::default(),
-            response_id: None,
-            request_id: None,
-        };
-
-        let processed = process_model_response(&agent, &response);
-
-        // Should have 4 items: message, tool call, handoff call, reasoning.
-        assert_eq!(processed.new_items.len(), 4);
-        assert!(matches!(processed.new_items[0], RunItem::MessageOutput(_)));
-        assert!(matches!(processed.new_items[1], RunItem::ToolCall(_)));
-        assert!(matches!(processed.new_items[2], RunItem::HandoffCall(_)));
-        assert!(matches!(processed.new_items[3], RunItem::Reasoning(_)));
-
-        assert_eq!(processed.function_calls.len(), 1);
-        assert_eq!(processed.function_calls[0].name, "add");
-
-        assert_eq!(processed.handoff_calls.len(), 1);
-        assert_eq!(processed.handoff_calls[0].tool_name, "transfer_to_other");
-    }
-
-    // ---- Test: build_tool_specs produces correct specs ----
-
-    #[test]
-    fn build_tool_specs_from_agent() {
-        use crate::tool::{ToolContext, WebSearchTool, function_tool};
-        use schemars::JsonSchema;
-        use serde::Deserialize;
-
-        #[derive(Deserialize, JsonSchema)]
-        #[allow(dead_code)]
-        struct Params {
-            x: i32,
-        }
-
-        let ft = function_tool::<(), Params, _, _>(
-            "my_tool",
-            "Does stuff.",
-            |_ctx: ToolContext<()>, _params: Params| async move {
-                Ok(ToolOutput::Text("ok".to_owned()))
-            },
-        )
-        .expect("should create tool");
-
-        let agent = Agent::<()>::builder("test")
-            .tool(Tool::Function(ft))
-            .tool(Tool::WebSearch(WebSearchTool::default()))
-            .build();
-
-        let specs = build_tool_specs(&agent);
-        assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].name, "my_tool");
-        assert_eq!(specs[0].description, "Does stuff.");
-        assert!(specs[0].strict);
-        assert_eq!(specs[1].name, "web_search");
-        assert!(!specs[1].strict);
-    }
-
-    // ---- Test: extract_final_output returns last message text ----
-
-    #[test]
-    fn extract_final_output_returns_last_message() {
-        let items = vec![
-            RunItem::MessageOutput(MessageOutputItem {
-                agent_name: "a".to_owned(),
-                raw_item: json!({
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "First"}]
-                }),
-            }),
-            RunItem::ToolCall(ToolCallItem {
-                agent_name: "a".to_owned(),
-                raw_item: json!({"type": "function_call"}),
-            }),
-            RunItem::MessageOutput(MessageOutputItem {
-                agent_name: "a".to_owned(),
-                raw_item: json!({
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "Second"}]
-                }),
-            }),
-        ];
-
-        let output = extract_final_output(&items, &[]);
-        assert_eq!(output, json!("Second"));
-    }
-
-    // ---- Test: extract_final_output with no messages returns null ----
-
-    #[test]
-    fn extract_final_output_no_messages_returns_null() {
-        let items = vec![RunItem::Reasoning(ReasoningItem {
-            agent_name: "a".to_owned(),
-            raw_item: json!({"type": "reasoning"}),
-        })];
-        let output = extract_final_output(&items, &[]);
-        assert_eq!(output, json!(null));
-    }
-
     // ---- Test: StopOnFirstTool behavior ----
 
     #[tokio::test]
     async fn stop_on_first_tool_behavior() {
-        use crate::tool::{ToolContext, function_tool};
+        use crate::agent::ToolUseBehavior;
+        use crate::items::ToolOutput;
+        use crate::tool::{Tool, ToolContext, function_tool};
         use schemars::JsonSchema;
         use serde::Deserialize;
 
@@ -1863,6 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_produces_events() {
+        use crate::stream_events::StreamEvent;
         use tokio_stream::StreamExt;
 
         // We need a 'static agent for run_streamed.
@@ -1922,7 +985,7 @@ mod tests {
                 _handoffs: &[HandoffToolSpec],
                 _tracing: ModelTracing,
                 _previous_response_id: Option<&str>,
-            ) -> Result<ModelResponse> {
+            ) -> crate::Result<ModelResponse> {
                 Ok(ModelResponse {
                     output: vec![],
                     usage: Usage::default(),
@@ -1941,8 +1004,11 @@ mod tests {
                 _handoffs: &'a [HandoffToolSpec],
                 _tracing: ModelTracing,
                 _previous_response_id: Option<&'a str>,
-            ) -> Pin<Box<dyn Stream<Item = Result<crate::items::ResponseStreamEvent>> + Send + 'a>>
-            {
+            ) -> Pin<
+                Box<
+                    dyn Stream<Item = crate::Result<crate::items::ResponseStreamEvent>> + Send + 'a,
+                >,
+            > {
                 // Yield events with delays.
                 Box::pin(async_stream::stream! {
                     for i in 0..100 {
@@ -1974,18 +1040,5 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // The test passes if it completes without hanging.
-    }
-
-    // ---- Test: process_model_response correctly categorizes output items ----
-
-    #[test]
-    fn build_tool_specs_from_agent_with_handoffs() {
-        let agent = Agent::<()>::builder("test")
-            .handoff(crate::handoffs::Handoff::to_agent("billing").build())
-            .build();
-
-        let specs = build_handoff_specs(&agent);
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].tool_name, "transfer_to_billing");
     }
 }

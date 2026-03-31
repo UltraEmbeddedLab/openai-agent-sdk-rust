@@ -5,8 +5,8 @@
 //!
 //! - [`InMemorySession`] -- a simple in-memory store suitable for testing and
 //!   single-process applications.
-//! - `SqliteSession` (behind the `sqlite-session` feature) -- a stub for future
-//!   SQLite-backed persistent storage.
+//! - [`SqliteSession`] (behind the `sqlite-session` feature) -- persistent
+//!   `SQLite`-backed storage via `rusqlite`.
 //!
 //! # Example
 //!

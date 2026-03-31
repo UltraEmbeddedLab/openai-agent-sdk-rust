@@ -98,6 +98,7 @@ pub mod models;
 pub mod prompts;
 pub mod result;
 pub mod retry;
+pub(crate) mod run_internal;
 pub mod run_state;
 pub mod runner;
 pub mod schema;
@@ -105,6 +106,9 @@ pub mod stream_events;
 pub mod tool;
 pub mod tracing_mod;
 pub mod usage;
+
+#[cfg(feature = "voice")]
+pub mod voice;
 
 /// Re-export of the tracing module under a friendlier name.
 ///
@@ -139,7 +143,7 @@ pub use runner::Runner;
 pub use schema::{ensure_strict_json_schema, json_schema_for};
 pub use stream_events::{RunItemEventName, StreamEvent};
 pub use tool::{FunctionTool, FunctionToolResult, Tool, ToolContext, function_tool};
-pub use tracing_mod::TracingConfig;
+pub use tracing_mod::{OtlpExporterConfig, TracingConfig};
 pub use usage::Usage;
 
 // ---------------------------------------------------------------------------
