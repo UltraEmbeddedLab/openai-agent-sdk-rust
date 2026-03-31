@@ -138,12 +138,62 @@ pub struct TranscriptDeltaEvent {
     pub item_id: Option<String>,
 }
 
+/// The server confirmed the session was created.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SessionCreatedEvent {
+    /// The unique identifier for this session.
+    pub session_id: String,
+}
+
+/// An audio delta chunk received from the model.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AudioDeltaEvent {
+    /// The decoded audio data bytes.
+    pub data: Vec<u8>,
+    /// The response ID this audio belongs to.
+    pub response_id: String,
+}
+
+/// The user started speaking (detected by voice activity detection).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct SpeechStartedEvent;
+
+/// The user stopped speaking (detected by voice activity detection).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct SpeechStoppedEvent;
+
+/// A tool call was fully received from the model.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ToolCallCreatedEvent {
+    /// The name of the function being called.
+    pub tool_name: String,
+    /// The call ID to use when sending the tool output back.
+    pub call_id: String,
+    /// The JSON-encoded arguments for the function call.
+    pub arguments: String,
+}
+
+/// The model finished generating a response.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ResponseDoneEvent {
+    /// The unique identifier for the completed response.
+    pub response_id: String,
+}
+
 /// An error occurred during the realtime session.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RealtimeErrorEvent {
     /// A human-readable error message.
     pub message: String,
+    /// An optional error code from the API.
+    pub code: Option<String>,
 }
 
 /// A guardrail was tripped during the session.
@@ -181,6 +231,8 @@ pub struct RealtimeHistoryAddedEvent {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RealtimeSessionEvent {
+    /// The server confirmed the session was created.
+    SessionCreated(SessionCreatedEvent),
     /// A new agent started handling the session.
     AgentStart(RealtimeAgentStartEvent),
     /// An agent stopped handling the session.
@@ -191,14 +243,24 @@ pub enum RealtimeSessionEvent {
     ToolStart(RealtimeToolStartEvent),
     /// A tool call finished executing.
     ToolEnd(RealtimeToolEndEvent),
+    /// A tool call was fully received from the model.
+    ToolCallCreated(ToolCallCreatedEvent),
     /// Audio data from the model.
     Audio(RealtimeAudioEvent),
+    /// An audio delta chunk from the model.
+    AudioDelta(AudioDeltaEvent),
     /// The model finished generating audio for an item.
     AudioEnd(RealtimeAudioEndEvent),
     /// Audio playback was interrupted.
     AudioInterrupted(RealtimeAudioInterruptedEvent),
+    /// The user started speaking.
+    SpeechStarted(SpeechStartedEvent),
+    /// The user stopped speaking.
+    SpeechStopped(SpeechStoppedEvent),
     /// A transcript delta or final transcript.
     Transcript(TranscriptDeltaEvent),
+    /// The model finished generating a response.
+    ResponseDone(ResponseDoneEvent),
     /// An error occurred.
     Error(RealtimeErrorEvent),
     /// A guardrail was tripped.
@@ -211,6 +273,8 @@ pub enum RealtimeSessionEvent {
     TurnEnded,
     /// The session was closed.
     SessionClosed,
+    /// An unrecognized event type from the API.
+    Unknown(serde_json::Value),
 }
 
 #[cfg(test)]
@@ -281,9 +345,19 @@ mod tests {
     fn error_event() {
         let event = RealtimeErrorEvent {
             message: "connection lost".to_owned(),
+            code: None,
         };
         let debug_str = format!("{event:?}");
         assert!(debug_str.contains("connection lost"));
+    }
+
+    #[test]
+    fn error_event_with_code() {
+        let event = RealtimeErrorEvent {
+            message: "rate limited".to_owned(),
+            code: Some("rate_limit_exceeded".to_owned()),
+        };
+        assert_eq!(event.code.as_deref(), Some("rate_limit_exceeded"));
     }
 
     // ---- Session event variants ----
@@ -291,16 +365,34 @@ mod tests {
     #[test]
     fn session_event_variants() {
         let events: Vec<RealtimeSessionEvent> = vec![
+            RealtimeSessionEvent::SessionCreated(SessionCreatedEvent {
+                session_id: "sess-1".to_owned(),
+            }),
             RealtimeSessionEvent::AgentStart(RealtimeAgentStartEvent {
                 agent_name: "a".to_owned(),
             }),
             RealtimeSessionEvent::AgentEnd(RealtimeAgentEndEvent {
                 agent_name: "a".to_owned(),
             }),
+            RealtimeSessionEvent::ToolCallCreated(ToolCallCreatedEvent {
+                tool_name: "get_weather".to_owned(),
+                call_id: "call-1".to_owned(),
+                arguments: "{}".to_owned(),
+            }),
+            RealtimeSessionEvent::AudioDelta(AudioDeltaEvent {
+                data: vec![1, 2, 3],
+                response_id: "resp-1".to_owned(),
+            }),
+            RealtimeSessionEvent::SpeechStarted(SpeechStartedEvent),
+            RealtimeSessionEvent::SpeechStopped(SpeechStoppedEvent),
+            RealtimeSessionEvent::ResponseDone(ResponseDoneEvent {
+                response_id: "resp-1".to_owned(),
+            }),
             RealtimeSessionEvent::TurnEnded,
             RealtimeSessionEvent::SessionClosed,
+            RealtimeSessionEvent::Unknown(serde_json::json!({"type": "custom"})),
         ];
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 11);
     }
 
     // ---- Send + Sync bounds ----
@@ -309,15 +401,21 @@ mod tests {
     fn event_types_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<TranscriptRole>();
+        assert_send_sync::<SessionCreatedEvent>();
         assert_send_sync::<RealtimeAgentStartEvent>();
         assert_send_sync::<RealtimeAgentEndEvent>();
         assert_send_sync::<RealtimeHandoffEvent>();
         assert_send_sync::<RealtimeToolStartEvent>();
         assert_send_sync::<RealtimeToolEndEvent>();
+        assert_send_sync::<ToolCallCreatedEvent>();
         assert_send_sync::<RealtimeAudioEvent>();
+        assert_send_sync::<AudioDeltaEvent>();
         assert_send_sync::<RealtimeAudioEndEvent>();
         assert_send_sync::<RealtimeAudioInterruptedEvent>();
+        assert_send_sync::<SpeechStartedEvent>();
+        assert_send_sync::<SpeechStoppedEvent>();
         assert_send_sync::<TranscriptDeltaEvent>();
+        assert_send_sync::<ResponseDoneEvent>();
         assert_send_sync::<RealtimeErrorEvent>();
         assert_send_sync::<RealtimeGuardrailTrippedEvent>();
         assert_send_sync::<RealtimeHistoryUpdatedEvent>();

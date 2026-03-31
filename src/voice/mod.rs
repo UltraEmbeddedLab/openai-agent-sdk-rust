@@ -44,11 +44,12 @@ pub use config::{
     RealtimeRunConfig, TurnDetection, Voice,
 };
 pub use events::{
-    RealtimeAgentEndEvent, RealtimeAgentStartEvent, RealtimeAudioEndEvent, RealtimeAudioEvent,
-    RealtimeAudioInterruptedEvent, RealtimeErrorEvent, RealtimeGuardrailTrippedEvent,
-    RealtimeHandoffEvent, RealtimeHistoryAddedEvent, RealtimeHistoryUpdatedEvent,
-    RealtimeSessionEvent, RealtimeToolEndEvent, RealtimeToolStartEvent, TranscriptDeltaEvent,
-    TranscriptRole,
+    AudioDeltaEvent, RealtimeAgentEndEvent, RealtimeAgentStartEvent, RealtimeAudioEndEvent,
+    RealtimeAudioEvent, RealtimeAudioInterruptedEvent, RealtimeErrorEvent,
+    RealtimeGuardrailTrippedEvent, RealtimeHandoffEvent, RealtimeHistoryAddedEvent,
+    RealtimeHistoryUpdatedEvent, RealtimeSessionEvent, RealtimeToolEndEvent,
+    RealtimeToolStartEvent, ResponseDoneEvent, SessionCreatedEvent, SpeechStartedEvent,
+    SpeechStoppedEvent, ToolCallCreatedEvent, TranscriptDeltaEvent, TranscriptRole,
 };
 pub use items::{
     AssistantAudioContent, AssistantMessageItem, AssistantTextContent, InputAudioContent,

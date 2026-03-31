@@ -5,6 +5,10 @@
 //!
 //! Mirrors the Python SDK's `codex.py` in the Codex extension.
 
+use std::sync::Arc;
+
+use crate::models::Model;
+
 use super::options::{CodexOptions, ThreadOptions};
 use super::thread::Thread;
 
@@ -26,11 +30,21 @@ use super::thread::Thread;
 /// let thread = codex.start_thread(None);
 /// assert!(thread.id().is_none()); // ID is assigned after first run.
 /// ```
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct Codex {
     options: CodexOptions,
     thread_options_default: ThreadOptions,
+    model: Option<Arc<dyn Model>>,
+}
+
+impl std::fmt::Debug for Codex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Codex")
+            .field("options", &self.options)
+            .field("thread_options_default", &self.thread_options_default)
+            .field("model", &self.model.as_ref().map(|_| "<model>"))
+            .finish()
+    }
 }
 
 impl Codex {
@@ -40,6 +54,7 @@ impl Codex {
         Self {
             options,
             thread_options_default: ThreadOptions::default(),
+            model: None,
         }
     }
 
@@ -47,6 +62,15 @@ impl Codex {
     #[must_use]
     pub fn default_instance() -> Self {
         Self::new(CodexOptions::default())
+    }
+
+    /// Set the model to use for thread execution.
+    ///
+    /// The model is propagated to every thread created by this Codex instance.
+    #[must_use]
+    pub fn with_model(mut self, model: Arc<dyn Model>) -> Self {
+        self.model = Some(model);
+        self
     }
 
     /// Get a reference to the current options.
@@ -58,23 +82,33 @@ impl Codex {
     /// Start a new thread with optional thread-specific options.
     ///
     /// If `options` is `None`, the default thread options are used.
+    /// The thread inherits the model from this Codex instance.
     #[must_use]
     pub fn start_thread(&self, options: Option<ThreadOptions>) -> Thread {
-        let _thread_options = options.unwrap_or_else(|| self.thread_options_default.clone());
-        Thread::new()
+        let thread_options = options.unwrap_or_else(|| self.thread_options_default.clone());
+        let mut thread = Thread::new().with_options(thread_options);
+        if let Some(ref model) = self.model {
+            thread = thread.with_model(Arc::clone(model));
+        }
+        thread
     }
 
     /// Resume an existing thread by its ID with optional thread-specific options.
     ///
     /// If `options` is `None`, the default thread options are used.
+    /// The thread inherits the model from this Codex instance.
     #[must_use]
     pub fn resume_thread(
         &self,
         thread_id: impl Into<String>,
         options: Option<ThreadOptions>,
     ) -> Thread {
-        let _thread_options = options.unwrap_or_else(|| self.thread_options_default.clone());
-        Thread::with_id(thread_id)
+        let thread_options = options.unwrap_or_else(|| self.thread_options_default.clone());
+        let mut thread = Thread::with_id(thread_id).with_options(thread_options);
+        if let Some(ref model) = self.model {
+            thread = thread.with_model(Arc::clone(model));
+        }
+        thread
     }
 }
 

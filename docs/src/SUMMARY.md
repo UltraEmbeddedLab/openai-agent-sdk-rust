@@ -15,6 +15,7 @@
 - [Streaming](./streaming.md)
 - [Context](./context.md)
 - [Configuration](./config.md)
+- [Models & Providers](./models.md)
 
 # Multi-Agent Patterns
 
@@ -37,6 +38,11 @@
 # Integrations
 
 - [Model Context Protocol (MCP)](./mcp.md)
+- [Voice / Realtime](./voice.md)
+
+# Extensions
+
+- [Extensions & Experimental](./extensions.md)
 
 # Reference
 

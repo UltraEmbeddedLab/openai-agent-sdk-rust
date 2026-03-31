@@ -1,15 +1,18 @@
 //! MCP server connection and tool discovery.
 //!
 //! This module defines the types for connecting to an MCP server and
-//! discovering the tools it exposes. The stdio transport communicates
-//! with MCP servers over JSON-RPC 2.0, spawning the server as a child
-//! process and exchanging newline-delimited JSON messages over stdin/stdout.
+//! discovering the tools it exposes. Three transports are supported:
+//!
+//! * **Stdio** — JSON-RPC over stdin/stdout of a spawned subprocess.
+//! * **SSE** — Server-Sent Events over HTTP (GET for receiving, POST for sending).
+//! * **`StreamableHttp`** — Bidirectional HTTP with streaming responses.
 
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -123,6 +126,24 @@ struct StdioProcess {
 }
 
 // ---------------------------------------------------------------------------
+// HttpTransportState — shared state for SSE and StreamableHTTP transports
+// ---------------------------------------------------------------------------
+
+/// Internal state for HTTP-based MCP transports (SSE and `StreamableHttp`).
+///
+/// Both SSE and `StreamableHttp` transports send JSON-RPC requests via HTTP
+/// POST and receive responses in the response body. The SSE transport
+/// additionally negotiates a POST endpoint via an initial SSE stream.
+struct HttpTransportState {
+    /// The URL to POST JSON-RPC requests to.
+    post_url: String,
+    /// HTTP headers to include in every request.
+    headers: HashMap<String, String>,
+    /// The shared HTTP client.
+    client: reqwest::Client,
+}
+
+// ---------------------------------------------------------------------------
 // MCPServer
 // ---------------------------------------------------------------------------
 
@@ -158,6 +179,8 @@ pub struct MCPServer {
     /// The child process handle (for stdio transport), protected by a mutex
     /// so that concurrent tool calls are serialized.
     process: Option<Arc<Mutex<StdioProcess>>>,
+    /// HTTP transport state (for SSE and `StreamableHttp` transports).
+    http_state: Option<Arc<HttpTransportState>>,
     /// Cached tool definitions from the last `tools/list` call.
     tools_cache: Vec<McpToolDef>,
     /// Monotonically increasing JSON-RPC request ID.
@@ -184,6 +207,7 @@ impl MCPServer {
         Self {
             config,
             process: None,
+            http_state: None,
             tools_cache: Vec::new(),
             next_id: AtomicU64::new(1),
             is_connected: false,
@@ -315,10 +339,12 @@ impl MCPServer {
                 self.connect_stdio(command.clone(), args.clone(), env.clone())
                     .await?;
             }
-            MCPTransport::Sse { .. } | MCPTransport::StreamableHttp { .. } => {
-                // HTTP-based transports are not yet implemented. Mark as
-                // connected so the API surface is exercisable in tests.
-                self.is_connected = true;
+            MCPTransport::Sse { url, headers } => {
+                self.connect_sse(url.clone(), headers.clone()).await?;
+            }
+            MCPTransport::StreamableHttp { url, headers } => {
+                self.connect_streamable_http(url.clone(), headers.clone())
+                    .await?;
             }
         }
         Ok(())
@@ -388,6 +414,130 @@ impl MCPServer {
         Ok(())
     }
 
+    /// Open an SSE connection and perform the MCP initialization handshake.
+    ///
+    /// The SSE transport works as follows:
+    /// 1. Open a GET request to the SSE endpoint with `Accept: text/event-stream`.
+    /// 2. Read the SSE stream until an `endpoint` event is received, which
+    ///    provides the POST URL for sending JSON-RPC requests.
+    /// 3. Send the `initialize` request and `notifications/initialized`
+    ///    notification via the POST endpoint.
+    async fn connect_sse(&mut self, url: String, headers: HashMap<String, String>) -> Result<()> {
+        let client = reqwest::Client::new();
+        let mut request = client.get(&url).header("Accept", "text/event-stream");
+
+        for (key, value) in &headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        let response = request.send().await.map_err(|e| AgentError::UserError {
+            message: format!("SSE connection to '{}' failed: {e}", self.config.name),
+        })?;
+
+        if !response.status().is_success() {
+            return Err(AgentError::UserError {
+                message: format!(
+                    "SSE connection to '{}' failed with status {}",
+                    self.config.name,
+                    response.status()
+                ),
+            });
+        }
+
+        // Read the SSE stream to find the endpoint event.
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut post_endpoint: Option<String> = None;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| AgentError::UserError {
+                message: format!("Failed to read SSE stream from '{}': {e}", self.config.name),
+            })?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Parse SSE events looking for the endpoint event.
+            while let Some((event_type, data)) = parse_sse_event(&mut buffer) {
+                if event_type == "endpoint" {
+                    post_endpoint = Some(resolve_url(&url, &data));
+                    break;
+                }
+            }
+
+            if post_endpoint.is_some() {
+                break;
+            }
+        }
+
+        let post_url = post_endpoint.ok_or_else(|| AgentError::UserError {
+            message: format!(
+                "SSE server '{}' did not provide an endpoint event",
+                self.config.name
+            ),
+        })?;
+
+        self.http_state = Some(Arc::new(HttpTransportState {
+            post_url,
+            headers,
+            client,
+        }));
+        self.is_connected = true;
+
+        // Perform the MCP initialization handshake.
+        let init_params = InitializeParams::default();
+        let _init_result = self
+            .send_request(
+                "initialize",
+                Some(
+                    serde_json::to_value(&init_params).map_err(|e| AgentError::UserError {
+                        message: format!("Failed to serialize initialize params: {e}"),
+                    })?,
+                ),
+            )
+            .await?;
+
+        self.send_notification("notifications/initialized", None)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Connect using the `StreamableHttp` transport and perform the MCP initialization handshake.
+    ///
+    /// The `StreamableHttp` transport is simpler than SSE: JSON-RPC requests are
+    /// sent as HTTP POST and responses come back in the response body.
+    async fn connect_streamable_http(
+        &mut self,
+        url: String,
+        headers: HashMap<String, String>,
+    ) -> Result<()> {
+        let client = reqwest::Client::new();
+
+        self.http_state = Some(Arc::new(HttpTransportState {
+            post_url: url,
+            headers,
+            client,
+        }));
+        self.is_connected = true;
+
+        // Perform the MCP initialization handshake.
+        let init_params = InitializeParams::default();
+        let _init_result = self
+            .send_request(
+                "initialize",
+                Some(
+                    serde_json::to_value(&init_params).map_err(|e| AgentError::UserError {
+                        message: format!("Failed to serialize initialize params: {e}"),
+                    })?,
+                ),
+            )
+            .await?;
+
+        self.send_notification("notifications/initialized", None)
+            .await?;
+
+        Ok(())
+    }
+
     /// Get the list of tools available from this MCP server.
     ///
     /// The server must be connected first via [`connect`](Self::connect).
@@ -405,11 +555,6 @@ impl MCPServer {
                     self.config.name
                 ),
             });
-        }
-
-        // If we have no process (SSE/HTTP stub), return empty.
-        if self.process.is_none() {
-            return Ok(Vec::new());
         }
 
         let result = self.send_request("tools/list", None).await?;
@@ -473,11 +618,6 @@ impl MCPServer {
             });
         }
 
-        // If we have no process (SSE/HTTP stub), return empty result.
-        if self.process.is_none() {
-            return Ok(McpToolResult::text(""));
-        }
-
         let params = serde_json::json!({
             "name": tool_name,
             "arguments": arguments.cloned().unwrap_or_else(|| serde_json::json!({})),
@@ -507,16 +647,17 @@ impl MCPServer {
     pub async fn disconnect(&mut self) -> Result<()> {
         if self.is_connected {
             // Attempt to send shutdown notification (best effort).
-            if self.process.is_some() {
-                let _ = self.send_notification("shutdown", None).await;
-            }
+            let _ = self.send_notification("shutdown", None).await;
 
-            // Kill the child process.
+            // Kill the child process (stdio transport).
             if let Some(process) = self.process.take() {
                 let mut guard = process.lock().await;
                 let _ = guard.child.kill().await;
                 drop(guard);
             }
+
+            // Drop HTTP state (SSE / StreamableHttp transports).
+            self.http_state = None;
 
             self.is_connected = false;
             self.tools_cache.clear();
@@ -557,7 +698,9 @@ impl MCPServer {
     // -----------------------------------------------------------------------
 
     /// Send a JSON-RPC request and wait for the response.
-    #[allow(clippy::significant_drop_tightening)] // Guard must span write + read.
+    ///
+    /// Routes to the appropriate transport: stdio (child process) or HTTP
+    /// (SSE / `StreamableHttp`).
     async fn send_request(
         &self,
         method: &str,
@@ -565,12 +708,30 @@ impl MCPServer {
     ) -> Result<serde_json::Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, method, params);
-        let request_json = serde_json::to_string(&request).map_err(|e| AgentError::UserError {
-            message: format!("Failed to serialize JSON-RPC request: {e}"),
-        })?;
 
-        let process = self.process.as_ref().ok_or_else(|| AgentError::UserError {
-            message: format!("MCP server '{}' has no active process", self.config.name),
+        if let Some(ref http) = self.http_state {
+            return Self::send_request_http(http, &self.config.name, &request).await;
+        }
+
+        if let Some(ref process) = self.process {
+            return Self::send_request_stdio(process, &self.config.name, id, &request).await;
+        }
+
+        Err(AgentError::UserError {
+            message: format!("MCP server '{}' has no active transport", self.config.name),
+        })
+    }
+
+    /// Send a JSON-RPC request over the stdio transport.
+    #[allow(clippy::significant_drop_tightening)] // Guard must span write + read.
+    async fn send_request_stdio(
+        process: &Arc<Mutex<StdioProcess>>,
+        server_name: &str,
+        id: u64,
+        request: &JsonRpcRequest,
+    ) -> Result<serde_json::Value> {
+        let request_json = serde_json::to_string(request).map_err(|e| AgentError::UserError {
+            message: format!("Failed to serialize JSON-RPC request: {e}"),
         })?;
 
         let mut stdio = process.lock().await;
@@ -581,27 +742,21 @@ impl MCPServer {
             .write_all(request_json.as_bytes())
             .await
             .map_err(|e| AgentError::UserError {
-                message: format!("Failed to write to MCP server '{}': {e}", self.config.name),
+                message: format!("Failed to write to MCP server '{server_name}': {e}"),
             })?;
         stdio
             .writer
             .write_all(b"\n")
             .await
             .map_err(|e| AgentError::UserError {
-                message: format!(
-                    "Failed to write newline to MCP server '{}': {e}",
-                    self.config.name
-                ),
+                message: format!("Failed to write newline to MCP server '{server_name}': {e}",),
             })?;
         stdio
             .writer
             .flush()
             .await
             .map_err(|e| AgentError::UserError {
-                message: format!(
-                    "Failed to flush MCP server '{}' stdin: {e}",
-                    self.config.name
-                ),
+                message: format!("Failed to flush MCP server '{server_name}' stdin: {e}",),
             })?;
 
         // Read the response line. Skip blank lines and notifications (messages
@@ -614,18 +769,12 @@ impl MCPServer {
                     .read_line(&mut line)
                     .await
                     .map_err(|e| AgentError::UserError {
-                        message: format!(
-                            "Failed to read from MCP server '{}': {e}",
-                            self.config.name
-                        ),
+                        message: format!("Failed to read from MCP server '{server_name}': {e}",),
                     })?;
 
             if bytes_read == 0 {
                 return Err(AgentError::UserError {
-                    message: format!(
-                        "MCP server '{}' closed stdout unexpectedly",
-                        self.config.name
-                    ),
+                    message: format!("MCP server '{server_name}' closed stdout unexpectedly",),
                 });
             }
 
@@ -638,7 +787,7 @@ impl MCPServer {
             // a response for a different id, skip it.
             let value: serde_json::Value =
                 serde_json::from_str(trimmed).map_err(|e| AgentError::UserError {
-                    message: format!("Invalid JSON from MCP server '{}': {e}", self.config.name),
+                    message: format!("Invalid JSON from MCP server '{server_name}': {e}"),
                 })?;
 
             // Skip notifications (no "id" field).
@@ -654,22 +803,80 @@ impl MCPServer {
             let response: JsonRpcResponse =
                 serde_json::from_value(value).map_err(|e| AgentError::UserError {
                     message: format!(
-                        "Failed to parse JSON-RPC response from '{}': {e}",
-                        self.config.name
+                        "Failed to parse JSON-RPC response from '{server_name}': {e}",
                     ),
                 })?;
 
             if let Some(error) = response.error {
                 return Err(AgentError::ModelBehavior {
                     message: format!(
-                        "MCP server '{}' error (code {}): {}",
-                        self.config.name, error.code, error.message
+                        "MCP server '{server_name}' error (code {}): {}",
+                        error.code, error.message
                     ),
                 });
             }
 
             return Ok(response.result.unwrap_or(serde_json::Value::Null));
         }
+    }
+
+    /// Send a JSON-RPC request over an HTTP transport (SSE or `StreamableHttp`).
+    async fn send_request_http(
+        state: &HttpTransportState,
+        server_name: &str,
+        request: &JsonRpcRequest,
+    ) -> Result<serde_json::Value> {
+        let mut req = state
+            .client
+            .post(&state.post_url)
+            .header("Content-Type", "application/json");
+
+        for (key, value) in &state.headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        let response = req
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| AgentError::UserError {
+                message: format!("MCP HTTP request to '{server_name}' failed: {e}",),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::UserError {
+                message: format!("MCP HTTP request to '{server_name}' failed ({status}): {body}",),
+            });
+        }
+
+        // The response body may be JSON-RPC directly, or SSE-wrapped.
+        // Try to parse as JSON-RPC first.
+        let body = response.text().await.map_err(|e| AgentError::UserError {
+            message: format!("Failed to read HTTP response from '{server_name}': {e}",),
+        })?;
+
+        // Some SSE-style responses wrap the JSON in `data: ` lines.
+        let json_text = extract_json_from_sse_or_raw(&body);
+
+        let json_response: JsonRpcResponse =
+            serde_json::from_str(json_text).map_err(|e| AgentError::UserError {
+                message: format!(
+                    "Failed to parse JSON-RPC response from '{server_name}': {e}\nBody: {body}",
+                ),
+            })?;
+
+        if let Some(error) = json_response.error {
+            return Err(AgentError::ModelBehavior {
+                message: format!(
+                    "MCP server '{server_name}' error (code {}): {}",
+                    error.code, error.message
+                ),
+            });
+        }
+
+        Ok(json_response.result.unwrap_or(serde_json::Value::Null))
     }
 
     /// Send a JSON-RPC notification (no response expected).
@@ -691,9 +898,128 @@ impl MCPServer {
                 let _ = guard.writer.flush().await;
             }
             drop(guard);
+        } else if let Some(ref http) = self.http_state {
+            // Best-effort POST for HTTP transports.
+            let mut req = http
+                .client
+                .post(&http.post_url)
+                .header("Content-Type", "application/json");
+
+            for (key, value) in &http.headers {
+                req = req.header(key.as_str(), value.as_str());
+            }
+
+            let _ = req.body(json).send().await;
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// SSE and URL helper functions
+// ---------------------------------------------------------------------------
+
+/// Parse a single SSE event from the buffer, returning the event type and data.
+///
+/// SSE events are terminated by a double newline (`\n\n`). Each event can
+/// contain `event:` and `data:` fields. Returns `None` if no complete event
+/// is available in the buffer yet.
+fn parse_sse_event(buffer: &mut String) -> Option<(String, String)> {
+    let pos = buffer.find("\n\n")?;
+    let event_block = buffer[..pos].to_string();
+    *buffer = buffer[pos + 2..].to_string();
+
+    let mut event_type = String::new();
+    let mut data = String::new();
+
+    for line in event_block.lines() {
+        if let Some(t) = line.strip_prefix("event: ") {
+            event_type = t.trim().to_string();
+        } else if let Some(t) = line.strip_prefix("event:") {
+            event_type = t.trim().to_string();
+        } else if let Some(d) = line.strip_prefix("data: ") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(d.trim());
+        } else if let Some(d) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(d.trim());
+        }
+    }
+
+    if data.is_empty() && event_type.is_empty() {
+        None
+    } else {
+        Some((event_type, data))
+    }
+}
+
+/// Resolve a potentially relative URL against a base URL.
+///
+/// If `relative` is already an absolute URL (starts with `http://` or `https://`),
+/// it is returned as-is. Otherwise, the path portion of `base` is replaced.
+fn resolve_url(base: &str, relative: &str) -> String {
+    if relative.starts_with("http://") || relative.starts_with("https://") {
+        return relative.to_string();
+    }
+
+    // Extract the origin (scheme + host + port) from the base URL.
+    // For a URL like "https://example.com:8080/sse", we want "https://example.com:8080".
+    let Some(scheme_end) = base.find("://") else {
+        // Fallback: just concatenate.
+        return format!("{base}/{relative}");
+    };
+
+    let after_scheme = &base[scheme_end + 3..];
+    let origin_end = after_scheme.find('/').map_or(after_scheme.len(), |p| p);
+    let origin = &base[..scheme_end + 3 + origin_end];
+
+    if relative.starts_with('/') {
+        format!("{origin}{relative}")
+    } else {
+        // Relative to the current path directory.
+        base.rfind('/').map_or_else(
+            || format!("{origin}/{relative}"),
+            |last_slash| {
+                if last_slash > scheme_end + 2 {
+                    format!("{}/{relative}", &base[..last_slash])
+                } else {
+                    format!("{origin}/{relative}")
+                }
+            },
+        )
+    }
+}
+
+/// Extract JSON from a response body that may be raw JSON or SSE-formatted.
+///
+/// Some MCP servers return the JSON-RPC response wrapped in SSE `data:` lines.
+/// This function strips the SSE framing if present, returning the raw JSON.
+fn extract_json_from_sse_or_raw(body: &str) -> &str {
+    let trimmed = body.trim();
+
+    // If it looks like JSON already, return it.
+    if trimmed.starts_with('{') {
+        return trimmed;
+    }
+
+    // Try to extract from SSE `data:` lines.
+    for line in trimmed.lines() {
+        let data = line
+            .strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"));
+        if let Some(d) = data {
+            let d = d.trim();
+            if d.starts_with('{') {
+                return d;
+            }
+        }
+    }
+
+    trimmed
 }
 
 #[cfg(test)]
@@ -780,12 +1106,94 @@ mod tests {
         assert_eq!(server.name(), "custom");
     }
 
-    // ---- Connect / disconnect lifecycle ----
+    // ---- Connect / disconnect lifecycle (wiremock) ----
+
+    /// Helper to create a wiremock SSE endpoint that returns an endpoint event
+    /// and responds to the initialize and tools/list requests.
+    async fn setup_sse_mock() -> (wiremock::MockServer, String) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+        let post_path = "/messages";
+
+        // GET /sse -> SSE stream with endpoint event.
+        let sse_body = format!("event: endpoint\ndata: {post_path}\n\n");
+        Mock::given(method("GET"))
+            .and(path("/sse"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("Content-Type", "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        // POST /messages for initialize -> success response.
+        Mock::given(method("POST"))
+            .and(path(post_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mock-server", "version": "1.0.0"}
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/sse", mock_server.uri());
+        (mock_server, url)
+    }
+
+    /// Helper to create a wiremock `StreamableHTTP` endpoint.
+    async fn setup_http_mock() -> (wiremock::MockServer, String) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        // POST /mcp -> JSON-RPC response.
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mock-http-server", "version": "1.0.0"}
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/mcp", mock_server.uri());
+        (mock_server, url)
+    }
 
     #[tokio::test]
     async fn connect_and_disconnect_sse() {
-        // SSE transport uses the stub path (no subprocess).
-        let mut server = MCPServer::sse("lifecycle", "https://example.com");
+        let (_mock, url) = setup_sse_mock().await;
+        let mut server = MCPServer::sse("lifecycle", &url);
+        assert!(!server.is_connected());
+
+        server.connect().await.expect("connect should succeed");
+        assert!(server.is_connected());
+
+        server
+            .disconnect()
+            .await
+            .expect("disconnect should succeed");
+        assert!(!server.is_connected());
+    }
+
+    #[tokio::test]
+    async fn connect_and_disconnect_streamable_http() {
+        let (_mock, url) = setup_http_mock().await;
+        let mut server = MCPServer::streamable_http("lifecycle-http", &url);
         assert!(!server.is_connected());
 
         server.connect().await.expect("connect should succeed");
@@ -800,7 +1208,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_after_disconnect() {
-        let mut server = MCPServer::sse("reconnect", "https://example.com");
+        let (_mock, url) = setup_http_mock().await;
+        let mut server = MCPServer::streamable_http("reconnect", &url);
         server.connect().await.unwrap();
         server.disconnect().await.unwrap();
         server.connect().await.unwrap();
@@ -822,14 +1231,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("not-connected"));
         assert!(msg.contains("not connected"));
-    }
-
-    #[tokio::test]
-    async fn list_tools_after_connect_sse_returns_empty() {
-        let mut server = MCPServer::sse("connected", "https://example.com");
-        server.connect().await.unwrap();
-        let tools = server.list_tools().await.unwrap();
-        assert!(tools.is_empty());
     }
 
     // ---- call_tool before connect ----
@@ -964,5 +1365,419 @@ mod tests {
             },
         );
         assert_eq!(config.name, "test-server");
+    }
+
+    // ---- parse_sse_event ----
+
+    #[test]
+    fn parse_sse_event_basic() {
+        let mut buf = "event: endpoint\ndata: /messages\n\n".to_string();
+        let result = parse_sse_event(&mut buf);
+        assert_eq!(
+            result,
+            Some(("endpoint".to_string(), "/messages".to_string()))
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn parse_sse_event_no_space_after_colon() {
+        let mut buf = "event:endpoint\ndata:/messages\n\n".to_string();
+        let result = parse_sse_event(&mut buf);
+        assert_eq!(
+            result,
+            Some(("endpoint".to_string(), "/messages".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_sse_event_data_only() {
+        let mut buf = "data: {\"key\":\"value\"}\n\n".to_string();
+        let result = parse_sse_event(&mut buf);
+        assert_eq!(
+            result,
+            Some((String::new(), "{\"key\":\"value\"}".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_sse_event_incomplete() {
+        let mut buf = "event: endpoint\ndata: /messages\n".to_string();
+        let result = parse_sse_event(&mut buf);
+        assert!(result.is_none());
+        // Buffer should be unchanged.
+        assert!(buf.contains("endpoint"));
+    }
+
+    #[test]
+    fn parse_sse_event_multiple_events() {
+        let mut buf = "event: ping\ndata: first\n\nevent: endpoint\ndata: /msg\n\n".to_string();
+        let first = parse_sse_event(&mut buf);
+        assert_eq!(first, Some(("ping".to_string(), "first".to_string())));
+        let second = parse_sse_event(&mut buf);
+        assert_eq!(second, Some(("endpoint".to_string(), "/msg".to_string())));
+        assert!(parse_sse_event(&mut buf).is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_empty_block_returns_none() {
+        let mut buf = "\n\n".to_string();
+        let result = parse_sse_event(&mut buf);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_multiline_data() {
+        let mut buf = "data: line1\ndata: line2\n\n".to_string();
+        let result = parse_sse_event(&mut buf);
+        assert_eq!(result, Some((String::new(), "line1\nline2".to_string())));
+    }
+
+    // ---- resolve_url ----
+
+    #[test]
+    fn resolve_url_absolute() {
+        let result = resolve_url("https://example.com/sse", "https://other.com/messages");
+        assert_eq!(result, "https://other.com/messages");
+    }
+
+    #[test]
+    fn resolve_url_absolute_path() {
+        let result = resolve_url("https://example.com/sse", "/messages");
+        assert_eq!(result, "https://example.com/messages");
+    }
+
+    #[test]
+    fn resolve_url_relative_path() {
+        let result = resolve_url("https://example.com/api/sse", "messages");
+        assert_eq!(result, "https://example.com/api/messages");
+    }
+
+    #[test]
+    fn resolve_url_with_port() {
+        let result = resolve_url("http://localhost:8080/sse", "/messages");
+        assert_eq!(result, "http://localhost:8080/messages");
+    }
+
+    #[test]
+    fn resolve_url_base_no_path() {
+        let result = resolve_url("https://example.com", "/messages");
+        assert_eq!(result, "https://example.com/messages");
+    }
+
+    // ---- extract_json_from_sse_or_raw ----
+
+    #[test]
+    fn extract_json_raw() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        assert_eq!(extract_json_from_sse_or_raw(body), body);
+    }
+
+    #[test]
+    fn extract_json_from_sse_data_line() {
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n\n";
+        assert_eq!(
+            extract_json_from_sse_or_raw(body),
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"
+        );
+    }
+
+    #[test]
+    fn extract_json_from_sse_no_space() {
+        let body = "data:{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n";
+        assert_eq!(
+            extract_json_from_sse_or_raw(body),
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"
+        );
+    }
+
+    #[test]
+    fn extract_json_with_whitespace() {
+        let body = "  {\"id\":1}  ";
+        assert_eq!(extract_json_from_sse_or_raw(body), "{\"id\":1}");
+    }
+
+    // ---- HTTP transport integration tests (wiremock) ----
+
+    #[tokio::test]
+    async fn streamable_http_list_tools() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Respond to initialize.
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mock", "version": "1.0.0"}
+                }
+            })))
+            .up_to_n_times(2) // initialize + notification
+            .mount(&mock_server)
+            .await;
+
+        // Respond to tools/list.
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {
+                    "tools": [
+                        {
+                            "name": "get_weather",
+                            "description": "Get weather for a location",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {"type": "string"}
+                                }
+                            }
+                        }
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/mcp", mock_server.uri());
+        let mut server = MCPServer::streamable_http("test-http", &url);
+        server.connect().await.unwrap();
+
+        let tools = server.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+
+        server.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streamable_http_call_tool() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Respond to all POSTs (initialize + tool call).
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "mock", "version": "1.0.0"}
+                }
+            })))
+            .up_to_n_times(2)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {
+                    "content": [{"type": "text", "text": "Sunny, 25C"}],
+                    "isError": false
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/mcp", mock_server.uri());
+        let mut server = MCPServer::streamable_http("tool-call", &url);
+        server.connect().await.unwrap();
+
+        let result = server
+            .call_tool(
+                "get_weather",
+                Some(&serde_json::json!({"location": "Tokyo"})),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.to_text(), "Sunny, 25C");
+
+        server.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_transport_error_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Return 500 error.
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/mcp", mock_server.uri());
+        let mut server = MCPServer::streamable_http("error-test", &url);
+
+        let result = server.connect().await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("500"),
+            "error should mention status: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_transport_jsonrpc_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32601, "message": "Method not found"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/mcp", mock_server.uri());
+        let mut server = MCPServer::streamable_http("rpc-error", &url);
+
+        let result = server.connect().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, AgentError::ModelBehavior { .. }),
+            "expected ModelBehavior, got: {err}"
+        );
+        assert!(err.to_string().contains("Method not found"));
+    }
+
+    #[tokio::test]
+    async fn sse_connect_no_endpoint_event() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        // SSE stream that never sends an endpoint event.
+        Mock::given(method("GET"))
+            .and(path("/sse"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("event: ping\ndata: hello\n\n")
+                    .insert_header("Content-Type", "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/sse", mock_server.uri());
+        let mut server = MCPServer::sse("no-endpoint", &url);
+
+        let result = server.connect().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("endpoint"));
+    }
+
+    #[tokio::test]
+    async fn sse_connect_with_custom_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+
+        // Verify the custom header is present.
+        Mock::given(method("GET"))
+            .and(path("/sse"))
+            .and(header("X-Custom", "test-value"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("event: endpoint\ndata: /msg\n\n")
+                    .insert_header("Content-Type", "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/msg"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "mock", "version": "1.0.0"}
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom".to_owned(), "test-value".to_owned());
+
+        let url = format!("{}/sse", mock_server.uri());
+        let mut server = MCPServer::sse_with_headers("header-test", &url, headers);
+        server
+            .connect()
+            .await
+            .expect("connect with custom headers should succeed");
+        assert!(server.is_connected());
+        server.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sse_connect_resolves_absolute_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let mock_server = wiremock::MockServer::start().await;
+        let abs_url = format!("{}/absolute-messages", mock_server.uri());
+
+        // SSE sends an absolute URL as endpoint.
+        let sse_body = format!("event: endpoint\ndata: {abs_url}\n\n");
+        Mock::given(method("GET"))
+            .and(path("/sse"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("Content-Type", "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/absolute-messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": {"name": "mock", "version": "1.0.0"}
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/sse", mock_server.uri());
+        let mut server = MCPServer::sse("abs-endpoint", &url);
+        server
+            .connect()
+            .await
+            .expect("connect should succeed with absolute endpoint");
+        assert!(server.is_connected());
+        server.disconnect().await.unwrap();
     }
 }
