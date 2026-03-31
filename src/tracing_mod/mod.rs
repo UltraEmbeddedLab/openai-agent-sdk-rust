@@ -22,12 +22,14 @@
 //! ```
 //! use openai_agents::tracing_support::{agent_span, generation_span, TracingConfig};
 //!
+//! # fn main() {
 //! let span = agent_span("my_agent", 1);
 //! let _guard = span.enter();
 //! // ... agent work happens here ...
-//! let gen = generation_span("my_agent", "gpt-4o");
-//! let _gen_guard = gen.enter();
+//! let gen_span = generation_span("my_agent", "gpt-4o");
+//! let _gen_guard = gen_span.enter();
 //! // ... model call ...
+//! # }
 //! ```
 
 pub mod config;

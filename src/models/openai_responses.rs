@@ -167,11 +167,22 @@ impl OpenAIResponsesModel {
         }
 
         // Output schema (structured output).
+        //
+        // The Responses API requires a `name` field inside `json_schema`.
+        // We use the schema's own `"title"` property when available, falling back
+        // to the generic name `"final_output"`.
         if let Some(schema) = output_schema {
+            let schema_name = schema
+                .json_schema
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("final_output")
+                .to_owned();
             body["text"] = json!({
                 "format": {
                     "type": "json_schema",
-                    "json_schema": schema.json_schema,
+                    "name": schema_name,
+                    "schema": schema.json_schema,
                     "strict": schema.strict,
                 }
             });

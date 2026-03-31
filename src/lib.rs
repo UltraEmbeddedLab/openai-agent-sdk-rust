@@ -68,7 +68,11 @@
 //! | [`runner`] | Agent execution loop |
 //! | [`schema`] | JSON Schema generation and strict-mode enforcement |
 //! | [`stream_events`] | Streaming event types |
+//! | [`prompts`] | System prompt construction helpers |
+//! | [`retry`] | Retry policies for transient failures |
+//! | [`run_state`] | Serializable checkpoint of an in-progress run |
 //! | [`tool`] | Function tools and hosted tool types |
+//! | [`tracing_mod`] | Distributed tracing spans and configuration |
 //! | [`usage`] | Token usage tracking |
 //!
 //! ## Feature Flags

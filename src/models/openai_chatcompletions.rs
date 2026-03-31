@@ -5,7 +5,7 @@
 //! `OpenAI`-compatible providers (Azure `OpenAI`, local LLMs, third-party gateways, etc.).
 //!
 //! Internally the model converts between the Responses API format used by the SDK (the
-//! [`ResponseInputItem`] / [`ResponseOutputItem`] JSON values) and the Chat Completions
+//! `ResponseInputItem` / `ResponseOutputItem` JSON values) and the Chat Completions
 //! message format (`messages` array with `role`/`content` objects).
 
 use std::pin::Pin;
@@ -689,12 +689,12 @@ impl OpenAIChatCompletionsModel {
             endpoint = %self.endpoint_url(),
             "Sending Chat Completions request"
         );
-
-        let mut request = self.client.post(self.endpoint_url()).json(&body);
-
-        for (key, value) in self.build_headers(model_settings) {
-            request = request.header(&key, &value);
+        let headers = self.build_headers(model_settings);
+        let mut request = self.client.post(self.endpoint_url());
+        for (key, value) in &headers {
+            request = request.header(key.as_str(), value.as_str());
         }
+        let request = request.json(&body);
 
         let response = request.send().await?;
 
@@ -768,10 +768,11 @@ impl Model for OpenAIChatCompletionsModel {
         let client = self.client.clone();
 
         Box::pin(async_stream::try_stream! {
-            let mut request = client.post(endpoint).json(&body);
+            let mut request = client.post(endpoint);
             for (key, value) in &headers {
                 request = request.header(key.as_str(), value.as_str());
             }
+            let request = request.json(&body);
 
             let response = request.send().await?;
 

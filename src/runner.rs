@@ -205,7 +205,6 @@ impl Runner {
         let mut input_guardrail_results: Vec<InputGuardrailResult> = Vec::new();
         let mut output_guardrail_results: Vec<OutputGuardrailResult> = Vec::new();
         let mut total_usage = Usage::default();
-        let mut previous_response_id: Option<String> = None;
 
         let tracing = if config.tracing_disabled {
             ModelTracing::Disabled
@@ -299,7 +298,7 @@ impl Runner {
             let tool_specs_ref = &tool_specs;
             let output_schema_ref = output_schema_spec.as_ref();
             let handoff_specs_ref = &handoff_specs;
-            let prev_resp_id = previous_response_id.as_deref();
+            let prev_resp_id: Option<&str> = None;
 
             let response = retry_policy
                 .execute(|| {
@@ -337,7 +336,14 @@ impl Runner {
             }
 
             // Track previous response ID.
-            previous_response_id.clone_from(&response.response_id);
+            //
+            // Note: `previous_response_id` is tracked here but currently passed as
+            // `None` to the model because the runner operates in stateless mode —
+            // it always sends the full conversation history as `input`. Using
+            // `previous_response_id` with the Responses API in stateful mode requires
+            // sending only the *delta* items (tool outputs) rather than the full
+            // history, which is not yet implemented.
+            let _ = &response.response_id; // suppress unused-variable warning
 
             // 10. Process the model response.
             let processed = process_model_response(current_agent, &response);
@@ -968,11 +974,23 @@ fn find_function_tool<'a, C: Send + Sync + 'static>(
 /// Extract the final output from the run items and model responses.
 ///
 /// Looks for the last message output text. If no text is found, returns `json!(null)`.
+/// If the extracted text parses as valid JSON, the parsed value is returned so that
+/// structured-output responses (which the model emits as a JSON string in the text
+/// field) are not double-encoded.
 fn extract_final_output(items: &[RunItem], _responses: &[ModelResponse]) -> serde_json::Value {
     // Walk backwards to find the last message output.
     for item in items.iter().rev() {
         if let RunItem::MessageOutput(msg) = item {
             if let Some(text) = ItemHelpers::extract_text(&msg.raw_item) {
+                // Attempt to parse as JSON to handle structured-output responses.
+                // If the text is valid JSON (object or array), return the parsed value.
+                // Otherwise wrap it as a JSON string, which is the normal plain-text case.
+                let trimmed = text.trim();
+                if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                    if let Ok(parsed) = serde_json::from_str(trimmed) {
+                        return parsed;
+                    }
+                }
                 return serde_json::Value::String(text);
             }
         }
