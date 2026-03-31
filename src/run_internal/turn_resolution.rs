@@ -171,6 +171,18 @@ pub fn build_tool_specs<C: Send + Sync + 'static>(agent: &Agent<C>) -> Vec<ToolS
                 params_json_schema: json!({}),
                 strict: false,
             },
+            Tool::Computer(_) => ToolSpec {
+                name: "computer".into(),
+                description: "Control a computer via screenshots and actions.".into(),
+                params_json_schema: json!({}),
+                strict: false,
+            },
+            Tool::ApplyPatch(_) => ToolSpec {
+                name: "apply_patch".into(),
+                description: "Apply a patch to edit files.".into(),
+                params_json_schema: json!({}),
+                strict: false,
+            },
         })
         .collect()
 }

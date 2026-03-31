@@ -21,6 +21,10 @@
 //! - [`session`] -- the [`RealtimeSession`] that orchestrates a live voice
 //!   conversation.
 //! - [`pipeline`] -- high-level [`VoicePipeline`] for end-to-end voice workflows.
+//! - [`workflow`] -- voice workflow orchestration for single and multi-agent
+//!   conversations.
+//! - [`utils`] -- audio utility functions (sentence splitting, PCM16 helpers).
+//! - [`result`] -- result types for streamed audio output.
 
 pub mod agent;
 pub mod config;
@@ -28,7 +32,10 @@ pub mod events;
 pub mod items;
 pub mod model;
 pub mod pipeline;
+pub mod result;
 pub mod session;
+pub mod utils;
+pub mod workflow;
 
 pub use agent::{RealtimeAgent, RealtimeAgentBuilder};
 pub use config::{
@@ -50,4 +57,12 @@ pub use items::{
 };
 pub use model::{RealtimeModel, RealtimeModelConfig, RealtimeModelEvent, RealtimeModelListener};
 pub use pipeline::{AudioInput, AudioOutput, VoicePipeline, VoicePipelineConfig};
+pub use result::StreamedAudioResult;
 pub use session::RealtimeSession;
+pub use utils::{
+    SentenceSplitter, get_sentence_based_splitter, pcm16_duration_seconds, resample_pcm16,
+};
+pub use workflow::{
+    InputHistoryItem, SingleAgentVoiceWorkflow, SingleAgentWorkflowCallbacks, TranscriptEntry,
+    VoiceWorkflowBase, VoiceWorkflowHelper, VoiceWorkflowResult,
+};

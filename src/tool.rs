@@ -255,6 +255,10 @@ pub enum Tool<C: Send + Sync + 'static = ()> {
     FileSearch(FileSearchTool),
     /// Code interpreter hosted tool.
     CodeInterpreter(CodeInterpreterTool),
+    /// Computer control hosted tool.
+    Computer(crate::computer::ComputerTool),
+    /// Apply-patch hosted tool for file editing.
+    ApplyPatch(crate::editor::ApplyPatchTool),
 }
 
 impl<C: Send + Sync + 'static> Clone for Tool<C> {
@@ -264,6 +268,8 @@ impl<C: Send + Sync + 'static> Clone for Tool<C> {
             Self::WebSearch(w) => Self::WebSearch(w.clone()),
             Self::FileSearch(f) => Self::FileSearch(f.clone()),
             Self::CodeInterpreter(c) => Self::CodeInterpreter(c.clone()),
+            Self::Computer(c) => Self::Computer(c.clone()),
+            Self::ApplyPatch(a) => Self::ApplyPatch(a.clone()),
         }
     }
 }
@@ -275,6 +281,8 @@ impl<C: Send + Sync + 'static> fmt::Debug for Tool<C> {
             Self::WebSearch(w) => f.debug_tuple("WebSearch").field(w).finish(),
             Self::FileSearch(fs) => f.debug_tuple("FileSearch").field(fs).finish(),
             Self::CodeInterpreter(c) => f.debug_tuple("CodeInterpreter").field(c).finish(),
+            Self::Computer(c) => f.debug_tuple("Computer").field(c).finish(),
+            Self::ApplyPatch(a) => f.debug_tuple("ApplyPatch").field(a).finish(),
         }
     }
 }
@@ -291,6 +299,8 @@ impl<C: Send + Sync + 'static> Tool<C> {
             Self::WebSearch(_) => "web_search",
             Self::FileSearch(_) => "file_search",
             Self::CodeInterpreter(_) => "code_interpreter",
+            Self::Computer(_) => "computer",
+            Self::ApplyPatch(_) => "apply_patch",
         }
     }
 
@@ -305,6 +315,8 @@ impl<C: Send + Sync + 'static> Tool<C> {
             Self::WebSearch(_) => "Search the web for information.",
             Self::FileSearch(_) => "Search over files in vector stores.",
             Self::CodeInterpreter(_) => "Execute code in a sandboxed environment.",
+            Self::Computer(_) => "Control a computer environment.",
+            Self::ApplyPatch(_) => "Apply patches to files.",
         }
     }
 
@@ -721,5 +733,46 @@ mod tests {
             .expect("invocation should succeed");
 
         assert_eq!(result, ToolOutput::Text("Hello, World!".to_owned()));
+    }
+
+    // ---- Computer tool variant ----
+
+    #[test]
+    fn tool_computer_name_and_description() {
+        let tool: Tool<()> = Tool::Computer(crate::computer::ComputerTool::default());
+        assert_eq!(tool.name(), "computer");
+        assert_eq!(tool.description(), "Control a computer environment.");
+        assert!(tool.is_hosted());
+    }
+
+    #[test]
+    fn tool_computer_clone_and_debug() {
+        let tool: Tool<()> = Tool::Computer(crate::computer::ComputerTool::new(800, 600));
+        let cloned = tool.clone();
+        assert_eq!(cloned.name(), "computer");
+
+        let debug_str = format!("{tool:?}");
+        assert!(debug_str.contains("Computer"));
+        assert!(debug_str.contains("800"));
+    }
+
+    // ---- ApplyPatch tool variant ----
+
+    #[test]
+    fn tool_apply_patch_name_and_description() {
+        let tool: Tool<()> = Tool::ApplyPatch(crate::editor::ApplyPatchTool);
+        assert_eq!(tool.name(), "apply_patch");
+        assert_eq!(tool.description(), "Apply patches to files.");
+        assert!(tool.is_hosted());
+    }
+
+    #[test]
+    fn tool_apply_patch_clone_and_debug() {
+        let tool: Tool<()> = Tool::ApplyPatch(crate::editor::ApplyPatchTool);
+        let cloned = tool.clone();
+        assert_eq!(cloned.name(), "apply_patch");
+
+        let debug_str = format!("{tool:?}");
+        assert!(debug_str.contains("ApplyPatch"));
     }
 }

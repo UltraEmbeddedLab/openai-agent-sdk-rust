@@ -56,6 +56,24 @@ pub enum AgentError {
         guardrail_name: String,
     },
 
+    /// A tool input guardrail triggered an exception, aborting the run.
+    #[error("tool input guardrail '{guardrail_name}' triggered on tool '{tool_name}'")]
+    ToolInputGuardrailTripwire {
+        /// The name of the guardrail that triggered.
+        guardrail_name: String,
+        /// The name of the tool whose input was rejected.
+        tool_name: String,
+    },
+
+    /// A tool output guardrail triggered an exception, aborting the run.
+    #[error("tool output guardrail '{guardrail_name}' triggered on tool '{tool_name}'")]
+    ToolOutputGuardrailTripwire {
+        /// The name of the guardrail that triggered.
+        guardrail_name: String,
+        /// The name of the tool whose output was rejected.
+        tool_name: String,
+    },
+
     /// An MCP tool call was internally cancelled.
     #[error("MCP tool cancellation: {message}")]
     McpToolCancellation {

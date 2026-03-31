@@ -15,6 +15,8 @@
 //! assert_eq!(handoff.tool_name, "transfer_to_billing_agent");
 //! ```
 
+pub mod history;
+
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -25,6 +27,11 @@ use crate::context::RunContextWrapper;
 use crate::error::Result;
 use crate::items::{InputContent, RunItem};
 use crate::schema::{ensure_strict_json_schema, json_schema_for};
+
+pub use history::{
+    HandoffHistoryMapper, default_handoff_history_mapper, get_conversation_history_wrappers,
+    nest_handoff_history, reset_conversation_history_wrappers, set_conversation_history_wrappers,
+};
 
 /// A boxed future that is `Send`.
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

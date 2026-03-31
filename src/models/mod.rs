@@ -8,6 +8,8 @@
 //! Completions API in submodules. To add support for a custom model backend,
 //! implement the [`Model`] trait.
 
+pub mod any_provider;
+pub mod litellm;
 pub mod multi_provider;
 pub mod openai_chatcompletions;
 pub mod openai_responses;
@@ -22,6 +24,8 @@ use crate::config::ModelSettings;
 use crate::error::Result;
 use crate::items::{ModelResponse, ResponseInputItem, ResponseStreamEvent};
 
+pub use any_provider::AnyProvider;
+pub use litellm::{LiteLLMModel, LiteLLMProvider};
 pub use multi_provider::MultiProvider;
 pub use openai_responses::{OpenAIProvider, OpenAIResponsesModel};
 

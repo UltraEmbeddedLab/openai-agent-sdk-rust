@@ -85,17 +85,23 @@
 //! | `sqlite-session` | SQLite-backed session storage |
 
 pub mod agent;
+pub mod computer;
 pub mod config;
 pub mod context;
+pub mod editor;
 pub mod error;
+pub mod extensions;
+pub mod global_config;
 pub mod guardrail;
 pub mod handoffs;
 pub mod items;
 pub mod lifecycle;
+pub mod logger;
 pub mod mcp;
 pub mod memory;
 pub mod models;
 pub mod prompts;
+pub mod repl;
 pub mod result;
 pub mod retry;
 pub(crate) mod run_internal;
@@ -104,8 +110,10 @@ pub mod runner;
 pub mod schema;
 pub mod stream_events;
 pub mod tool;
+pub mod tool_guardrails;
 pub mod tracing_mod;
 pub mod usage;
+pub mod util;
 
 #[cfg(feature = "voice")]
 pub mod voice;
@@ -123,19 +131,34 @@ pub use tracing_mod as tracing_support;
 // ---------------------------------------------------------------------------
 
 pub use agent::{Agent, AgentBuilder, Instructions, OutputSchema, ToolUseBehavior};
+pub use computer::{Button, Computer, ComputerTool, Environment};
 pub use config::{DEFAULT_MAX_TURNS, ModelRef, ModelSettings, RunConfig, ToolChoice};
 pub use context::RunContextWrapper;
+pub use editor::{
+    ApplyDiffMode, ApplyPatchEditor, ApplyPatchOperation, ApplyPatchOperationType,
+    ApplyPatchResult, ApplyPatchStatus, ApplyPatchTool, apply_diff,
+};
 pub use error::{AgentError, Result};
 pub use guardrail::{
     GuardrailFunctionOutput, InputGuardrail, InputGuardrailResult, OutputGuardrail,
     OutputGuardrailResult,
 };
-pub use handoffs::{Handoff, HandoffInputData};
+pub use handoffs::{
+    Handoff, HandoffHistoryMapper, HandoffInputData, default_handoff_history_mapper,
+    get_conversation_history_wrappers, nest_handoff_history, reset_conversation_history_wrappers,
+    set_conversation_history_wrappers,
+};
 pub use items::{InputContent, ItemHelpers, ModelResponse, RunItem, ToolOutput};
 pub use lifecycle::{AgentHooks, RunHooks};
 pub use mcp::{MCPConfig, MCPServer};
-pub use memory::{InMemorySession, Session};
-pub use models::{HandoffToolSpec, Model, ModelProvider, ModelTracing, ToolSpec};
+pub use memory::{
+    CompactingSession, CompactorFn, EncryptedSession, InMemorySession, Session,
+    select_compaction_candidate_items,
+};
+pub use models::{
+    AnyProvider, HandoffToolSpec, LiteLLMModel, LiteLLMProvider, Model, ModelProvider,
+    ModelTracing, ToolSpec,
+};
 pub use result::{RunResult, RunResultStreaming};
 pub use retry::RetryPolicy;
 pub use run_state::{CURRENT_SCHEMA_VERSION, NextStep, PendingToolCall, RunState};
@@ -143,8 +166,25 @@ pub use runner::Runner;
 pub use schema::{ensure_strict_json_schema, json_schema_for};
 pub use stream_events::{RunItemEventName, StreamEvent};
 pub use tool::{FunctionTool, FunctionToolResult, Tool, ToolContext, function_tool};
+pub use tool_guardrails::{
+    GuardrailBehavior, ToolGuardrailFunctionOutput, ToolInputGuardrail, ToolInputGuardrailResult,
+    ToolOutputGuardrail, ToolOutputGuardrailResult,
+};
 pub use tracing_mod::{OtlpExporterConfig, TracingConfig};
 pub use usage::Usage;
+
+// Utility module re-exports.
+pub use global_config::{
+    OpenAiApi, ResponsesTransport, get_default_base_url, get_default_model, get_default_openai_api,
+    get_default_openai_key, get_default_responses_transport, set_default_base_url,
+    set_default_model, set_default_openai_api, set_default_openai_key,
+    set_default_responses_transport,
+};
+pub use logger::enable_verbose_stdout_logging;
+pub use repl::run_demo_loop;
+pub use util::{
+    pretty_print_result, transform_string_function_style, truncate_string, validate_json_schema,
+};
 
 // ---------------------------------------------------------------------------
 // Constructor helpers for non_exhaustive types

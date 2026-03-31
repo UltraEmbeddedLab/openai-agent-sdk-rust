@@ -7,6 +7,10 @@
 //!   single-process applications.
 //! - [`SqliteSession`] (behind the `sqlite-session` feature) -- persistent
 //!   `SQLite`-backed storage via `rusqlite`.
+//! - [`EncryptedSession`] -- a wrapper that encrypts items before storing them
+//!   in any underlying session.
+//! - [`CompactingSession`] -- a wrapper that automatically compacts old history
+//!   when the item count exceeds a threshold.
 //!
 //! # Example
 //!
@@ -22,12 +26,16 @@
 //! # });
 //! ```
 
+pub mod compacting;
+pub mod encrypted;
 pub mod in_memory;
 pub mod session;
 
 #[cfg(feature = "sqlite-session")]
 pub mod sqlite;
 
+pub use compacting::{CompactingSession, CompactorFn, select_compaction_candidate_items};
+pub use encrypted::EncryptedSession;
 pub use in_memory::InMemorySession;
 pub use session::Session;
 

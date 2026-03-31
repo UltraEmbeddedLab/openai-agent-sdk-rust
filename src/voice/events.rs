@@ -249,8 +249,8 @@ mod tests {
             to_agent: "b".to_owned(),
         };
         let debug_str = format!("{event:?}");
-        assert!(debug_str.contains("a"));
-        assert!(debug_str.contains("b"));
+        assert!(debug_str.contains('a'));
+        assert!(debug_str.contains('b'));
     }
 
     #[test]
