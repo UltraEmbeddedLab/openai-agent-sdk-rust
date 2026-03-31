@@ -1,5 +1,5 @@
 [book]
-authors = ["Bogdan"]
+authors = ["Bogdan Gewald"]
 language = "en"
 multilingual = false
 src = "src"
@@ -11,5 +11,5 @@ build-dir = "book"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/bogdan/openai-agents-rs"
-edit-url-template = "https://github.com/bogdan/openai-agents-rs/edit/main/docs/{path}"
+git-repository-url = "https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust"
+edit-url-template = "https://github.com/UltraEmbeddedLab/openai-agent-sdk-rust/edit/main/docs/{path}"

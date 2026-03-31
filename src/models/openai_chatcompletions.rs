@@ -651,7 +651,7 @@ impl OpenAIChatCompletionsModel {
                 format!("Bearer {}", self.api_key),
             ),
             ("Content-Type".to_owned(), "application/json".to_owned()),
-            ("User-Agent".to_owned(), "openai-agents-rs/0.1.0".to_owned()),
+            ("User-Agent".to_owned(), "openai-agent-sdk-rust/0.1.0".to_owned()),
         ];
 
         if let Some(ref extra) = model_settings.extra_headers {
