@@ -1,7 +1,6 @@
 [book]
 authors = ["Bogdan Gewald"]
 language = "en"
-multilingual = false
 src = "src"
 title = "OpenAI Agents SDK for Rust"
 
