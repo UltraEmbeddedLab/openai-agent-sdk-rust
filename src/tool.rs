@@ -211,6 +211,11 @@ pub struct WebSearchTool {
     /// Controls the amount of search context retrieved. Common values are
     /// `"low"`, `"medium"`, and `"high"`.
     pub search_context_size: Option<String>,
+    /// Whether the web search tool may fetch live internet content.
+    ///
+    /// When `None`, the API default is used. Set to `Some(false)` to request
+    /// cached or indexed-only behaviour where supported.
+    pub external_web_access: Option<bool>,
 }
 
 /// File search hosted tool configuration.
@@ -634,6 +639,7 @@ mod tests {
         let tool = WebSearchTool::default();
         assert!(tool.user_location.is_none());
         assert!(tool.search_context_size.is_none());
+        assert!(tool.external_web_access.is_none());
     }
 
     #[test]
@@ -682,6 +688,7 @@ mod tests {
         let tool: Tool<()> = Tool::WebSearch(WebSearchTool {
             user_location: None,
             search_context_size: Some("medium".to_owned()),
+            external_web_access: None,
         });
         let cloned = tool.clone();
         assert_eq!(cloned.name(), "web_search");

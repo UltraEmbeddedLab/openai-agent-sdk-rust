@@ -36,10 +36,12 @@ pub mod protocol;
 pub mod server;
 pub mod util;
 
-pub use config::MCPConfig;
+pub use config::{ApprovalCallable, ApprovalPolicy, ApprovalPolicySetting, MCPConfig};
 pub use protocol::{
     ClientInfo, InitializeParams, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, ListToolsResult, McpContent, McpToolDef, McpToolResult,
+    JsonRpcResponse, ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, McpContent,
+    McpResource, McpResourceContent, McpResourceTemplate, McpToolDef, McpToolResult,
+    ReadResourceResult,
 };
 pub use server::{MCPServer, MCPServerConfig, MCPTransport};
 pub use util::{ToolFilter, ToolFilterContext, ToolFilterStatic};

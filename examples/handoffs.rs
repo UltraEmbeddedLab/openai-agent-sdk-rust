@@ -120,15 +120,6 @@ async fn main() -> anyhow::Result<()> {
         .tool_description("Transfer to the support agent for technical issues.")
         .build();
 
-    println!(
-        "Billing handoff tool: {} -> {}",
-        billing_handoff.tool_name, billing_handoff.agent_name
-    );
-    println!(
-        "Support handoff tool: {} -> {}",
-        support_handoff.tool_name, support_handoff.agent_name
-    );
-
     // Build the triage agent with both handoffs.
     let triage_agent = Agent::<()>::builder("triage")
         .instructions(

@@ -141,6 +141,8 @@ struct HttpTransportState {
     headers: HashMap<String, String>,
     /// The shared HTTP client.
     client: reqwest::Client,
+    /// The MCP session ID captured from response headers.
+    session_id: Mutex<Option<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +189,12 @@ pub struct MCPServer {
     next_id: AtomicU64,
     /// Whether the server connection is currently active.
     is_connected: bool,
+    /// The MCP session ID assigned by the server (StreamableHttp only).
+    ///
+    /// Populated from the `Mcp-Session-Id` response header during the
+    /// initialization handshake. Can be used to resume sessions across
+    /// connection restarts.
+    session_id: Option<String>,
 }
 
 // Manual Debug implementation because `StdioProcess` does not implement Debug.
@@ -211,6 +219,7 @@ impl MCPServer {
             tools_cache: Vec::new(),
             next_id: AtomicU64::new(1),
             is_connected: false,
+            session_id: None,
         }
     }
 
@@ -479,6 +488,7 @@ impl MCPServer {
             post_url,
             headers,
             client,
+            session_id: Mutex::new(None),
         }));
         self.is_connected = true;
 
@@ -516,6 +526,7 @@ impl MCPServer {
             post_url: url,
             headers,
             client,
+            session_id: Mutex::new(None),
         }));
         self.is_connected = true;
 
@@ -531,6 +542,13 @@ impl MCPServer {
                 ),
             )
             .await?;
+
+        // Capture the session ID from the HTTP state after initialization.
+        if let Some(ref http) = self.http_state {
+            if let Ok(guard) = http.session_id.lock() {
+                self.session_id = guard.clone();
+            }
+        }
 
         self.send_notification("notifications/initialized", None)
             .await?;
@@ -635,6 +653,101 @@ impl MCPServer {
         Ok(tool_result)
     }
 
+    /// List the resources available from this MCP server.
+    ///
+    /// Sends a `resources/list` JSON-RPC request. An optional cursor can be
+    /// provided for pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::UserError`] if the server is not connected.
+    pub async fn list_resources(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<super::protocol::ListResourcesResult> {
+        if !self.is_connected {
+            return Err(AgentError::UserError {
+                message: format!(
+                    "MCP server '{}' is not connected. Call connect() first.",
+                    self.config.name
+                ),
+            });
+        }
+
+        let params = cursor.map(|c| serde_json::json!({ "cursor": c }));
+        let result = self.send_request("resources/list", params).await?;
+        serde_json::from_value(result).map_err(|e| AgentError::UserError {
+            message: format!(
+                "Failed to parse resources/list response from '{}': {e}",
+                self.config.name
+            ),
+        })
+    }
+
+    /// List the resource templates available from this MCP server.
+    ///
+    /// Sends a `resources/templates/list` JSON-RPC request. An optional cursor
+    /// can be provided for pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::UserError`] if the server is not connected.
+    pub async fn list_resource_templates(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<super::protocol::ListResourceTemplatesResult> {
+        if !self.is_connected {
+            return Err(AgentError::UserError {
+                message: format!(
+                    "MCP server '{}' is not connected. Call connect() first.",
+                    self.config.name
+                ),
+            });
+        }
+
+        let params = cursor.map(|c| serde_json::json!({ "cursor": c }));
+        let result = self
+            .send_request("resources/templates/list", params)
+            .await?;
+        serde_json::from_value(result).map_err(|e| AgentError::UserError {
+            message: format!(
+                "Failed to parse resources/templates/list response from '{}': {e}",
+                self.config.name
+            ),
+        })
+    }
+
+    /// Read the content of a resource by URI.
+    ///
+    /// Sends a `resources/read` JSON-RPC request and returns the resource
+    /// content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::UserError`] if the server is not connected.
+    pub async fn read_resource(
+        &self,
+        uri: &str,
+    ) -> Result<super::protocol::ReadResourceResult> {
+        if !self.is_connected {
+            return Err(AgentError::UserError {
+                message: format!(
+                    "MCP server '{}' is not connected. Call connect() first.",
+                    self.config.name
+                ),
+            });
+        }
+
+        let params = serde_json::json!({ "uri": uri });
+        let result = self.send_request("resources/read", Some(params)).await?;
+        serde_json::from_value(result).map_err(|e| AgentError::UserError {
+            message: format!(
+                "Failed to parse resources/read response from '{}': {e}",
+                self.config.name
+            ),
+        })
+    }
+
     /// Disconnect from the MCP server and release resources.
     ///
     /// For stdio transport, this kills the subprocess. After disconnecting,
@@ -661,6 +774,7 @@ impl MCPServer {
 
             self.is_connected = false;
             self.tools_cache.clear();
+            self.session_id = None;
         }
         Ok(())
     }
@@ -691,6 +805,16 @@ impl MCPServer {
     #[must_use]
     pub fn cached_tools(&self) -> &[McpToolDef] {
         &self.tools_cache
+    }
+
+    /// Get the MCP session ID assigned by the server.
+    ///
+    /// Only populated for `StreamableHttp` transports when the server returns
+    /// an `Mcp-Session-Id` header during initialization. Returns `None` for
+    /// stdio and SSE transports.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     // -----------------------------------------------------------------------
@@ -849,6 +973,15 @@ impl MCPServer {
             return Err(AgentError::UserError {
                 message: format!("MCP HTTP request to '{server_name}' failed ({status}): {body}",),
             });
+        }
+
+        // Capture the Mcp-Session-Id header if present.
+        if let Some(session_id_value) = response.headers().get("mcp-session-id") {
+            if let Ok(sid) = session_id_value.to_str() {
+                if let Ok(mut guard) = state.session_id.lock() {
+                    *guard = Some(sid.to_owned());
+                }
+            }
         }
 
         // The response body may be JSON-RPC directly, or SSE-wrapped.

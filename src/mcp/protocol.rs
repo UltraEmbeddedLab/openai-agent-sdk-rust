@@ -327,6 +327,93 @@ pub struct ListToolsResult {
     pub tools: Vec<McpToolDef>,
 }
 
+// ---------------------------------------------------------------------------
+// MCP resource types
+// ---------------------------------------------------------------------------
+
+/// An MCP resource descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct McpResource {
+    /// The URI identifying this resource.
+    pub uri: String,
+    /// A human-readable name for the resource.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// An optional description of the resource.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The MIME type of the resource content.
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+/// The result of a `resources/list` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ListResourcesResult {
+    /// The resources exposed by the server.
+    pub resources: Vec<McpResource>,
+    /// Optional cursor for pagination.
+    #[serde(default, rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+}
+
+/// An MCP resource template descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct McpResourceTemplate {
+    /// The URI template (RFC 6570) for this resource.
+    #[serde(rename = "uriTemplate")]
+    pub uri_template: String,
+    /// A human-readable name for the template.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// An optional description of the template.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The MIME type of the resource content.
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+/// The result of a `resources/templates/list` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ListResourceTemplatesResult {
+    /// The resource templates exposed by the server.
+    #[serde(rename = "resourceTemplates")]
+    pub resource_templates: Vec<McpResourceTemplate>,
+    /// Optional cursor for pagination.
+    #[serde(default, rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+}
+
+/// A content item inside a `resources/read` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct McpResourceContent {
+    /// The URI of the resource.
+    pub uri: String,
+    /// The MIME type of the content.
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+    /// Text content (for text resources).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Base64-encoded binary content (for blob resources).
+    #[serde(default)]
+    pub blob: Option<String>,
+}
+
+/// The result of a `resources/read` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ReadResourceResult {
+    /// The content items returned for the resource.
+    pub contents: Vec<McpResourceContent>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +782,47 @@ mod tests {
     }
 
     // ---- Clone assertions ----
+
+    // ---- Resource types ----
+
+    #[test]
+    fn list_resources_result_deserialization() {
+        let json_str = r#"{
+            "resources": [
+                {"uri": "file:///readme.md", "name": "README", "mimeType": "text/markdown"}
+            ],
+            "nextCursor": "abc"
+        }"#;
+        let result: super::ListResourcesResult = serde_json::from_str(json_str).unwrap();
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(result.resources[0].uri, "file:///readme.md");
+        assert_eq!(result.next_cursor.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn list_resource_templates_result_deserialization() {
+        let json_str = r#"{
+            "resourceTemplates": [
+                {"uriTemplate": "file:///{path}", "name": "File"}
+            ]
+        }"#;
+        let result: super::ListResourceTemplatesResult = serde_json::from_str(json_str).unwrap();
+        assert_eq!(result.resource_templates.len(), 1);
+        assert_eq!(result.resource_templates[0].uri_template, "file:///{path}");
+        assert!(result.next_cursor.is_none());
+    }
+
+    #[test]
+    fn read_resource_result_deserialization() {
+        let json_str = r#"{
+            "contents": [
+                {"uri": "file:///data.txt", "mimeType": "text/plain", "text": "hello world"}
+            ]
+        }"#;
+        let result: super::ReadResourceResult = serde_json::from_str(json_str).unwrap();
+        assert_eq!(result.contents.len(), 1);
+        assert_eq!(result.contents[0].text.as_deref(), Some("hello world"));
+    }
 
     #[test]
     fn types_are_cloneable() {
