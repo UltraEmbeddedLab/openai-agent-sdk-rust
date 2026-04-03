@@ -1,9 +1,10 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch: # disabled automatic trigger — re-enable push trigger when ready
+  # push:
+  #   tags:
+  #     - "v*"
 
 env:
   CARGO_TERM_COLOR: always
