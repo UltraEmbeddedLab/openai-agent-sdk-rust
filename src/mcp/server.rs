@@ -142,7 +142,7 @@ struct HttpTransportState {
     /// The shared HTTP client.
     client: reqwest::Client,
     /// The MCP session ID captured from response headers.
-    session_id: Mutex<Option<String>>,
+    session_id: std::sync::Mutex<Option<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ pub struct MCPServer {
     next_id: AtomicU64,
     /// Whether the server connection is currently active.
     is_connected: bool,
-    /// The MCP session ID assigned by the server (StreamableHttp only).
+    /// The MCP session ID assigned by the server (`StreamableHttp` only).
     ///
     /// Populated from the `Mcp-Session-Id` response header during the
     /// initialization handshake. Can be used to resume sessions across
@@ -488,7 +488,7 @@ impl MCPServer {
             post_url,
             headers,
             client,
-            session_id: Mutex::new(None),
+            session_id: std::sync::Mutex::new(None),
         }));
         self.is_connected = true;
 
@@ -526,7 +526,7 @@ impl MCPServer {
             post_url: url,
             headers,
             client,
-            session_id: Mutex::new(None),
+            session_id: std::sync::Mutex::new(None),
         }));
         self.is_connected = true;
 
@@ -546,7 +546,7 @@ impl MCPServer {
         // Capture the session ID from the HTTP state after initialization.
         if let Some(ref http) = self.http_state {
             if let Ok(guard) = http.session_id.lock() {
-                self.session_id = guard.clone();
+                self.session_id.clone_from(&guard);
             }
         }
 
@@ -725,10 +725,7 @@ impl MCPServer {
     /// # Errors
     ///
     /// Returns [`AgentError::UserError`] if the server is not connected.
-    pub async fn read_resource(
-        &self,
-        uri: &str,
-    ) -> Result<super::protocol::ReadResourceResult> {
+    pub async fn read_resource(&self, uri: &str) -> Result<super::protocol::ReadResourceResult> {
         if !self.is_connected {
             return Err(AgentError::UserError {
                 message: format!(

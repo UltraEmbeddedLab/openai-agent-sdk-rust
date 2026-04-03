@@ -127,9 +127,7 @@ impl Clone for MCPConfig {
             tool_timeout_seconds: self.tool_timeout_seconds,
             approval_policy: self.approval_policy.as_ref().map(|p| match p {
                 ApprovalPolicySetting::Policy(pol) => ApprovalPolicySetting::Policy(*pol),
-                ApprovalPolicySetting::PerTool(map) => {
-                    ApprovalPolicySetting::PerTool(map.clone())
-                }
+                ApprovalPolicySetting::PerTool(map) => ApprovalPolicySetting::PerTool(map.clone()),
                 ApprovalPolicySetting::Callable(f) => {
                     ApprovalPolicySetting::Callable(Arc::clone(f))
                 }
@@ -283,9 +281,8 @@ mod tests {
         let debug = format!("{setting:?}");
         assert!(debug.contains("Always"));
 
-        let setting = ApprovalPolicySetting::Callable(Arc::new(|_: &str| {
-            Box::pin(async { false })
-        }));
+        let setting =
+            ApprovalPolicySetting::Callable(Arc::new(|_: &str| Box::pin(async { false })));
         let debug = format!("{setting:?}");
         assert!(debug.contains("Callable"));
     }

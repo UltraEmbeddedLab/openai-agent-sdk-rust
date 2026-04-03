@@ -1,6 +1,6 @@
 //! Reasoning content replay for chat completions models.
 //!
-//! When using non-OpenAI providers (e.g. DeepSeek) through the chat completions
+//! When using non-OpenAI providers (e.g. `DeepSeek`) through the chat completions
 //! interface, models may include reasoning/thinking content in their responses.
 //! This module provides types and utilities for deciding whether to replay that
 //! reasoning content back to the model in subsequent requests, which can improve
@@ -38,12 +38,15 @@ pub struct ReasoningContentReplayContext {
 ///
 /// Receives a [`ReasoningContentReplayContext`] and returns `true` if reasoning
 /// content should be included in the next request.
-pub type ShouldReplayReasoningContent =
-    Arc<dyn Fn(ReasoningContentReplayContext) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+pub type ShouldReplayReasoningContent = Arc<
+    dyn Fn(ReasoningContentReplayContext) -> Pin<Box<dyn Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Default implementation for the reasoning content replay decision.
 ///
-/// Returns `true` for DeepSeek models (model names containing `"deepseek"`),
+/// Returns `true` for `DeepSeek` models (model names containing `"deepseek"`),
 /// which benefit from having their reasoning content replayed. Returns `false`
 /// for all other models.
 #[must_use]
@@ -65,11 +68,7 @@ pub fn extract_reasoning_content(
 ) -> Vec<ReasoningContentSource> {
     output
         .iter()
-        .filter(|item| {
-            item.get("type")
-                .and_then(serde_json::Value::as_str)
-                == Some("reasoning")
-        })
+        .filter(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning"))
         .map(|item| ReasoningContentSource {
             item: item.clone(),
             origin_model: model.to_owned(),
