@@ -13,6 +13,7 @@ pub mod litellm;
 pub mod multi_provider;
 pub mod openai_chatcompletions;
 pub mod openai_responses;
+pub mod reasoning_content_replay;
 
 use std::pin::Pin;
 use std::sync::Arc;
