@@ -546,7 +546,10 @@ impl MCPServer {
         // Capture the session ID from the HTTP state after initialization.
         if let Some(ref http) = self.http_state {
             if let Ok(guard) = http.session_id.lock() {
-                self.session_id.clone_from(&guard);
+                #[allow(clippy::assigning_clones)]
+                {
+                    self.session_id = guard.clone();
+                }
             }
         }
 
@@ -636,9 +639,11 @@ impl MCPServer {
             });
         }
 
+        let empty = serde_json::json!({});
+        let args = arguments.unwrap_or(&empty);
         let params = serde_json::json!({
             "name": tool_name,
-            "arguments": arguments.cloned().unwrap_or_else(|| serde_json::json!({})),
+            "arguments": args,
         });
 
         let result = self.send_request("tools/call", Some(params)).await?;

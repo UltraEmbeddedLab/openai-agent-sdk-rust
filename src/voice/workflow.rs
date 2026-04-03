@@ -203,7 +203,7 @@ impl<C: Send + Sync + 'static> SingleAgentVoiceWorkflow<C> {
     ///
     /// 1. Fires the `on_run` callback (if any).
     /// 2. Appends the transcription to the input history.
-    /// 3. Runs the agent via `Runner::run_streamed` (placeholder).
+    /// 3. Runs the agent via `Runner::run_streamed`.
     /// 4. Streams text deltas back.
     /// 5. Updates the history with the assistant's response.
     ///
@@ -213,9 +213,9 @@ impl<C: Send + Sync + 'static> SingleAgentVoiceWorkflow<C> {
     ///
     /// # Note
     ///
-    /// The full implementation requires `Runner::run_streamed`, which is not
-    /// yet available.  This method currently adds the transcription to history
-    /// and returns an error.
+    /// The full integration with `Runner::run_streamed` for this workflow
+    /// is still TODO. At present, this method only adds the transcription to
+    /// history and returns an error.
     #[allow(clippy::unused_async)]
     pub async fn process_transcription(&self, transcription: &str) -> Result<()> {
         // Fire callback.
@@ -239,9 +239,8 @@ impl<C: Send + Sync + 'static> SingleAgentVoiceWorkflow<C> {
         // 6. Update current_agent = result.last_agent
 
         Err(crate::error::AgentError::UserError {
-            message:
-                "Voice workflow processing requires Runner::run_streamed (not yet implemented)"
-                    .into(),
+            message: "Voice workflow processing is not yet integrated with Runner::run_streamed"
+                .into(),
         })
     }
 }

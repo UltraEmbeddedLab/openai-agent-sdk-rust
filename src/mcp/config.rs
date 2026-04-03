@@ -24,16 +24,14 @@ pub enum ApprovalPolicy {
     Never,
 }
 
-/// Type alias for the boxed future returned by an approval callback.
-type ApprovalFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
-
 /// A callable approval policy that receives the tool name and returns
 /// whether approval is required.
 ///
 /// This mirrors the Python SDK's `LocalMCPApprovalCallable`. The callback
 /// receives the tool name and should return `true` if the tool requires
 /// approval.
-pub type ApprovalCallable = Arc<dyn Fn(&str) -> ApprovalFuture + Send + Sync>;
+pub type ApprovalCallable =
+    Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
 
 /// The approval policy setting for MCP tool invocations.
 ///
@@ -47,6 +45,16 @@ pub enum ApprovalPolicySetting {
     PerTool(HashMap<String, ApprovalPolicy>),
     /// A callable that determines the approval policy per tool at runtime.
     Callable(ApprovalCallable),
+}
+
+impl Clone for ApprovalPolicySetting {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Policy(p) => Self::Policy(*p),
+            Self::PerTool(m) => Self::PerTool(m.clone()),
+            Self::Callable(f) => Self::Callable(Arc::clone(f)),
+        }
+    }
 }
 
 impl std::fmt::Debug for ApprovalPolicySetting {
@@ -95,7 +103,7 @@ impl ApprovalPolicySetting {
 /// assert!(cfg.convert_errors_to_messages);
 /// assert_eq!(cfg.tool_timeout_seconds, Some(30.0));
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct MCPConfig {
     /// Whether to convert MCP tool errors into model-visible error messages
@@ -118,22 +126,6 @@ pub struct MCPConfig {
     /// When set, tools matching the policy will require user approval before
     /// execution. Defaults to `None` (no approval required).
     pub approval_policy: Option<ApprovalPolicySetting>,
-}
-
-impl Clone for MCPConfig {
-    fn clone(&self) -> Self {
-        Self {
-            convert_errors_to_messages: self.convert_errors_to_messages,
-            tool_timeout_seconds: self.tool_timeout_seconds,
-            approval_policy: self.approval_policy.as_ref().map(|p| match p {
-                ApprovalPolicySetting::Policy(pol) => ApprovalPolicySetting::Policy(*pol),
-                ApprovalPolicySetting::PerTool(map) => ApprovalPolicySetting::PerTool(map.clone()),
-                ApprovalPolicySetting::Callable(f) => {
-                    ApprovalPolicySetting::Callable(Arc::clone(f))
-                }
-            }),
-        }
-    }
 }
 
 impl MCPConfig {

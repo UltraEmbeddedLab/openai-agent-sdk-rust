@@ -52,8 +52,8 @@ pub type ShouldReplayReasoningContent = Arc<
 #[must_use]
 pub fn default_should_replay_reasoning_content() -> ShouldReplayReasoningContent {
     Arc::new(|ctx: ReasoningContentReplayContext| {
-        let should_replay = ctx.model.to_lowercase().contains("deepseek");
-        Box::pin(async move { should_replay })
+        let model = ctx.model;
+        Box::pin(async move { model.to_lowercase().contains("deepseek") })
     })
 }
 

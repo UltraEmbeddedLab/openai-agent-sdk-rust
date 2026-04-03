@@ -140,16 +140,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Choose model: real API or mock.
-    let model: Arc<dyn Model> = OpenAIResponsesModel::new("gpt-4o-mini").map_or_else(
-        |_| {
-            println!("OPENAI_API_KEY not set -- using mock model");
-            Arc::new(MockTriageModel) as Arc<dyn Model>
-        },
-        |real_model| {
-            println!("Using OpenAI API (gpt-4o-mini)");
-            Arc::new(real_model)
-        },
-    );
+    let model: Arc<dyn Model> = if let Ok(real_model) = OpenAIResponsesModel::new("gpt-4o-mini") {
+        println!("Using OpenAI API (gpt-4o-mini)");
+        Arc::new(real_model)
+    } else {
+        println!("OPENAI_API_KEY not set -- using mock model");
+        Arc::new(MockTriageModel) as Arc<dyn Model>
+    };
 
     // Run the triage agent with a billing-related question.
     let result = Runner::run_with_model(
