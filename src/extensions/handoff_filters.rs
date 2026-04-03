@@ -1,6 +1,6 @@
 //! Handoff input filters for transforming data before agent-to-agent transfers.
 //!
-//! These utilities create [`HandoffInputFilter`](crate::handoffs::HandoffInputFilter)
+//! These utilities create [`HandoffInputFilter`]
 //! instances that strip tool calls, reasoning items, and MCP metadata from the
 //! conversation history before handing off to the next agent.
 //!
