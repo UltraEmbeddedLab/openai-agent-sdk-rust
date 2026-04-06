@@ -46,8 +46,11 @@ pub struct ToolExecutionResult {
 
 /// Execute all function tool calls for a single turn.
 ///
-/// For each parsed function call this finds the matching tool, invokes it,
-/// fires the appropriate lifecycle hooks, and collects the outputs.
+/// Tool calls are executed sequentially in the order returned by the model,
+/// preserving the guarantee that earlier tool calls complete (including any
+/// shared-context side effects) before later ones begin. Each failed
+/// invocation produces a `ToolOutput::Text("Error: ...")` output without
+/// aborting the remaining calls.
 pub async fn execute_tool_calls<C: Send + Sync + 'static>(
     agent: &Agent<C>,
     function_calls: &[ParsedFunctionCall],

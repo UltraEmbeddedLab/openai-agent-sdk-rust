@@ -793,7 +793,7 @@ mod tests {
             ],
             "nextCursor": "abc"
         }"#;
-        let result: super::ListResourcesResult = serde_json::from_str(json_str).unwrap();
+        let result: ListResourcesResult = serde_json::from_str(json_str).unwrap();
         assert_eq!(result.resources.len(), 1);
         assert_eq!(result.resources[0].uri, "file:///readme.md");
         assert_eq!(result.next_cursor.as_deref(), Some("abc"));
@@ -806,7 +806,7 @@ mod tests {
                 {"uriTemplate": "file:///{path}", "name": "File"}
             ]
         }"#;
-        let result: super::ListResourceTemplatesResult = serde_json::from_str(json_str).unwrap();
+        let result: ListResourceTemplatesResult = serde_json::from_str(json_str).unwrap();
         assert_eq!(result.resource_templates.len(), 1);
         assert_eq!(result.resource_templates[0].uri_template, "file:///{path}");
         assert!(result.next_cursor.is_none());
@@ -819,7 +819,7 @@ mod tests {
                 {"uri": "file:///data.txt", "mimeType": "text/plain", "text": "hello world"}
             ]
         }"#;
-        let result: super::ReadResourceResult = serde_json::from_str(json_str).unwrap();
+        let result: ReadResourceResult = serde_json::from_str(json_str).unwrap();
         assert_eq!(result.contents.len(), 1);
         assert_eq!(result.contents[0].text.as_deref(), Some("hello world"));
     }

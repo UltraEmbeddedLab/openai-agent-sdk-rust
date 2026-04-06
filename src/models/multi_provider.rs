@@ -25,6 +25,28 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 /// The default model name used when no model name is provided.
 const DEFAULT_MODEL: &str = "gpt-4o";
 
+/// Controls how `openai/...` model strings are interpreted by [`MultiProvider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OpenAiPrefixMode {
+    /// Strip the `openai/` prefix before calling the `OpenAI` provider (default, historical behavior).
+    #[default]
+    Alias,
+    /// Keep the full `openai/...` string as a literal model ID.
+    ModelId,
+}
+
+/// Controls behavior for unrecognized prefixes in [`MultiProvider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum UnknownPrefixMode {
+    /// Return an error for unknown prefixes (default, historical behavior).
+    #[default]
+    Error,
+    /// Pass the full string through to the `OpenAI` provider.
+    ModelId,
+}
+
 /// A model provider that routes model names to the appropriate backend.
 ///
 /// By default, it routes standard `OpenAI` model names to the Responses API
@@ -42,6 +64,10 @@ pub struct MultiProvider {
     base_url: String,
     /// Custom provider overrides keyed by model name prefix.
     custom_providers: HashMap<String, Arc<dyn ModelProvider>>,
+    /// Controls how `openai/...` model strings are interpreted.
+    openai_prefix_mode: OpenAiPrefixMode,
+    /// Controls behavior for unrecognized prefixes.
+    unknown_prefix_mode: UnknownPrefixMode,
 }
 
 impl fmt::Debug for MultiProvider {
@@ -53,6 +79,8 @@ impl fmt::Debug for MultiProvider {
                 "custom_providers",
                 &self.custom_providers.keys().collect::<Vec<_>>(),
             )
+            .field("openai_prefix_mode", &self.openai_prefix_mode)
+            .field("unknown_prefix_mode", &self.unknown_prefix_mode)
             .finish()
     }
 }
@@ -74,6 +102,8 @@ impl MultiProvider {
             api_key,
             base_url: DEFAULT_BASE_URL.to_owned(),
             custom_providers: HashMap::new(),
+            openai_prefix_mode: OpenAiPrefixMode::default(),
+            unknown_prefix_mode: UnknownPrefixMode::default(),
         })
     }
 
@@ -84,6 +114,8 @@ impl MultiProvider {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             custom_providers: HashMap::new(),
+            openai_prefix_mode: OpenAiPrefixMode::default(),
+            unknown_prefix_mode: UnknownPrefixMode::default(),
         }
     }
 
@@ -94,6 +126,8 @@ impl MultiProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             custom_providers: HashMap::new(),
+            openai_prefix_mode: OpenAiPrefixMode::default(),
+            unknown_prefix_mode: UnknownPrefixMode::default(),
         }
     }
 
@@ -109,6 +143,20 @@ impl MultiProvider {
     ) {
         self.custom_providers.insert(prefix.into(), provider);
     }
+
+    /// Set the `OpenAI` prefix mode.
+    #[must_use]
+    pub const fn with_openai_prefix_mode(mut self, mode: OpenAiPrefixMode) -> Self {
+        self.openai_prefix_mode = mode;
+        self
+    }
+
+    /// Set the unknown prefix mode.
+    #[must_use]
+    pub const fn with_unknown_prefix_mode(mut self, mode: UnknownPrefixMode) -> Self {
+        self.unknown_prefix_mode = mode;
+        self
+    }
 }
 
 #[async_trait]
@@ -123,10 +171,14 @@ impl ModelProvider for MultiProvider {
                 return provider.get_model(Some(name));
             }
 
-            // Built-in: "openai/" prefix strips and routes to Responses API.
+            // Built-in: "openai/" prefix behavior depends on `openai_prefix_mode`.
             if prefix == "openai" {
+                let model_id = match self.openai_prefix_mode {
+                    OpenAiPrefixMode::Alias => rest,
+                    OpenAiPrefixMode::ModelId => name,
+                };
                 return Ok(Arc::new(OpenAIResponsesModel::with_config(
-                    rest,
+                    model_id,
                     &self.api_key,
                     &self.base_url,
                 )));
@@ -140,10 +192,17 @@ impl ModelProvider for MultiProvider {
                 )));
             }
 
-            // Unknown prefix.
-            return Err(AgentError::UserError {
-                message: format!("Unknown model prefix: '{prefix}'"),
-            });
+            // Unknown prefix behavior depends on `unknown_prefix_mode`.
+            return match self.unknown_prefix_mode {
+                UnknownPrefixMode::Error => Err(AgentError::UserError {
+                    message: format!("Unknown model prefix: '{prefix}'"),
+                }),
+                UnknownPrefixMode::ModelId => Ok(Arc::new(OpenAIResponsesModel::with_config(
+                    name,
+                    &self.api_key,
+                    &self.base_url,
+                ))),
+            };
         }
 
         // No prefix: route to the Responses API.
@@ -349,7 +408,8 @@ mod tests {
         temp_env::with_var_unset("OPENAI_API_KEY", || {
             let result = MultiProvider::from_env();
             assert!(result.is_err());
-            let err = result.unwrap_err();
+            assert!(result.is_err());
+            let err = result.err().unwrap();
             assert!(
                 matches!(err, AgentError::UserError { .. }),
                 "expected UserError, got {err:?}"
@@ -407,6 +467,105 @@ mod tests {
         assert!(
             debug.contains("[REDACTED]"),
             "Debug output should show [REDACTED] for the API key"
+        );
+    }
+
+    // ---- OpenAI prefix mode ----
+
+    #[test]
+    fn openai_prefix_mode_alias_strips_prefix() {
+        // Default mode (Alias) strips the "openai/" prefix.
+        let provider = MultiProvider::new("sk-test");
+        assert_eq!(provider.openai_prefix_mode, OpenAiPrefixMode::Alias);
+        let model = provider
+            .get_model(Some("openai/gpt-4o"))
+            .expect("should succeed");
+        let _ = model;
+    }
+
+    #[tokio::test]
+    async fn openai_prefix_mode_model_id_keeps_full_name() {
+        let mut provider =
+            MultiProvider::new("sk-test").with_openai_prefix_mode(OpenAiPrefixMode::ModelId);
+        // Register a custom provider for "openai" to verify what model name it receives.
+        provider.register_provider("openai", Arc::new(StubProvider));
+        let model = provider
+            .get_model(Some("openai/gpt-4o"))
+            .expect("should succeed");
+        // StubProvider receives the full name because custom providers take priority.
+        let response = model
+            .get_response(
+                None,
+                &[],
+                &ModelSettings::default(),
+                &[],
+                None,
+                &[],
+                ModelTracing::Disabled,
+                None,
+            )
+            .await
+            .expect("should succeed");
+        assert_eq!(
+            response.response_id.as_deref(),
+            Some("openai/gpt-4o"),
+            "custom provider should receive full name"
+        );
+    }
+
+    #[test]
+    fn openai_prefix_mode_model_id_routes_to_responses_api() {
+        // Without a custom provider override, ModelId mode should pass the full name
+        // to the Responses API model.
+        let provider =
+            MultiProvider::new("sk-test").with_openai_prefix_mode(OpenAiPrefixMode::ModelId);
+        let model = provider
+            .get_model(Some("openai/gpt-4o"))
+            .expect("should succeed");
+        let _ = model;
+    }
+
+    // ---- Unknown prefix mode ----
+
+    #[test]
+    fn unknown_prefix_mode_error_returns_error() {
+        // Default mode (Error) returns an error for unknown prefixes.
+        let provider = MultiProvider::new("sk-test");
+        assert_eq!(provider.unknown_prefix_mode, UnknownPrefixMode::Error);
+        let result = provider.get_model(Some("anthropic/claude-3"));
+        let err = result.err().expect("should be an error");
+        assert!(
+            matches!(err, AgentError::UserError { .. }),
+            "expected UserError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_prefix_mode_model_id_passes_through() {
+        // ModelId mode passes the full name to the Responses API.
+        let provider =
+            MultiProvider::new("sk-test").with_unknown_prefix_mode(UnknownPrefixMode::ModelId);
+        let model = provider
+            .get_model(Some("anthropic/claude-3"))
+            .expect("should succeed with ModelId mode");
+        let _ = model;
+    }
+
+    // ---- Debug includes new fields ----
+
+    #[test]
+    fn debug_includes_prefix_modes() {
+        let provider = MultiProvider::new("sk-test")
+            .with_openai_prefix_mode(OpenAiPrefixMode::ModelId)
+            .with_unknown_prefix_mode(UnknownPrefixMode::ModelId);
+        let debug = format!("{provider:?}");
+        assert!(
+            debug.contains("openai_prefix_mode: ModelId"),
+            "Debug output should include openai_prefix_mode"
+        );
+        assert!(
+            debug.contains("unknown_prefix_mode: ModelId"),
+            "Debug output should include unknown_prefix_mode"
         );
     }
 }

@@ -1,6 +1,6 @@
 //! Span creation helpers for structured agent tracing.
 //!
-//! Each function creates a [`tracing::Span`] at the `INFO` level with
+//! Each function creates a [`Span`] at the `INFO` level with
 //! domain-specific fields. The spans integrate with any subscriber that
 //! is configured via `tracing-subscriber`, including OpenTelemetry
 //! exporters.

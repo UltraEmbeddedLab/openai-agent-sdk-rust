@@ -38,4 +38,6 @@ pub mod spans;
 
 pub use config::{TracingConfig, is_tracing_disabled, set_tracing_disabled};
 pub use exporter::OtlpExporterConfig;
+#[cfg(feature = "tracing-otlp")]
+pub use exporter::OtlpGuard;
 pub use spans::{agent_span, function_span, generation_span, guardrail_span, handoff_span};

@@ -27,7 +27,7 @@ use crate::items::{ModelResponse, ResponseInputItem, ResponseStreamEvent};
 
 pub use any_provider::AnyProvider;
 pub use litellm::{LiteLLMModel, LiteLLMProvider};
-pub use multi_provider::MultiProvider;
+pub use multi_provider::{MultiProvider, OpenAiPrefixMode, UnknownPrefixMode};
 pub use openai_responses::{OpenAIProvider, OpenAIResponsesModel};
 
 /// Tracing configuration for model calls.

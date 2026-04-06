@@ -246,7 +246,7 @@ mod tests {
 
     #[tokio::test]
     async fn approval_policy_per_tool() {
-        let mut map = std::collections::HashMap::new();
+        let mut map = HashMap::new();
         map.insert("dangerous".to_owned(), ApprovalPolicy::Always);
         map.insert("safe".to_owned(), ApprovalPolicy::Never);
         let setting = ApprovalPolicySetting::PerTool(map);

@@ -242,6 +242,22 @@ pub struct CodeInterpreterTool {
     pub container: Option<String>,
 }
 
+/// Tool search hosted tool configuration.
+///
+/// Corresponds to the `OpenAI` Responses API tool search tool. When added to
+/// an agent, the model can search deferred tools by namespace for dynamic
+/// tool discovery.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolSearchTool {
+    /// Optional description for the tool search.
+    pub description: Option<String>,
+    /// Execution mode: `"server"` or `"client"`.
+    pub execution: Option<String>,
+    /// Optional parameters for the tool search.
+    pub parameters: Option<serde_json::Value>,
+}
+
 // ---------------------------------------------------------------------------
 // Tool enum
 // ---------------------------------------------------------------------------
@@ -264,6 +280,8 @@ pub enum Tool<C: Send + Sync + 'static = ()> {
     Computer(crate::computer::ComputerTool),
     /// Apply-patch hosted tool for file editing.
     ApplyPatch(crate::editor::ApplyPatchTool),
+    /// Tool search hosted tool for dynamic tool discovery.
+    ToolSearch(ToolSearchTool),
 }
 
 impl<C: Send + Sync + 'static> Clone for Tool<C> {
@@ -275,6 +293,7 @@ impl<C: Send + Sync + 'static> Clone for Tool<C> {
             Self::CodeInterpreter(c) => Self::CodeInterpreter(c.clone()),
             Self::Computer(c) => Self::Computer(c.clone()),
             Self::ApplyPatch(a) => Self::ApplyPatch(a.clone()),
+            Self::ToolSearch(t) => Self::ToolSearch(t.clone()),
         }
     }
 }
@@ -288,6 +307,7 @@ impl<C: Send + Sync + 'static> fmt::Debug for Tool<C> {
             Self::CodeInterpreter(c) => f.debug_tuple("CodeInterpreter").field(c).finish(),
             Self::Computer(c) => f.debug_tuple("Computer").field(c).finish(),
             Self::ApplyPatch(a) => f.debug_tuple("ApplyPatch").field(a).finish(),
+            Self::ToolSearch(t) => f.debug_tuple("ToolSearch").field(t).finish(),
         }
     }
 }
@@ -306,6 +326,7 @@ impl<C: Send + Sync + 'static> Tool<C> {
             Self::CodeInterpreter(_) => "code_interpreter",
             Self::Computer(_) => "computer",
             Self::ApplyPatch(_) => "apply_patch",
+            Self::ToolSearch(_) => "tool_search",
         }
     }
 
@@ -322,6 +343,7 @@ impl<C: Send + Sync + 'static> Tool<C> {
             Self::CodeInterpreter(_) => "Execute code in a sandboxed environment.",
             Self::Computer(_) => "Control a computer environment.",
             Self::ApplyPatch(_) => "Apply patches to files.",
+            Self::ToolSearch(_) => "Search for deferred tools by namespace.",
         }
     }
 
@@ -781,5 +803,41 @@ mod tests {
 
         let debug_str = format!("{tool:?}");
         assert!(debug_str.contains("ApplyPatch"));
+    }
+
+    // ---- ToolSearch tool variant ----
+
+    #[test]
+    fn tool_search_default() {
+        let tool = ToolSearchTool::default();
+        assert!(tool.description.is_none());
+        assert!(tool.execution.is_none());
+        assert!(tool.parameters.is_none());
+    }
+
+    #[test]
+    fn tool_search_name_and_description() {
+        let tool: Tool<()> = Tool::ToolSearch(ToolSearchTool::default());
+        assert_eq!(tool.name(), "tool_search");
+        assert_eq!(
+            tool.description(),
+            "Search for deferred tools by namespace."
+        );
+        assert!(tool.is_hosted());
+    }
+
+    #[test]
+    fn tool_search_clone_and_debug() {
+        let tool: Tool<()> = Tool::ToolSearch(ToolSearchTool {
+            description: Some("search tools".to_owned()),
+            execution: Some("server".to_owned()),
+            parameters: None,
+        });
+        let cloned = tool.clone();
+        assert_eq!(cloned.name(), "tool_search");
+
+        let debug_str = format!("{tool:?}");
+        assert!(debug_str.contains("ToolSearch"));
+        assert!(debug_str.contains("search tools"));
     }
 }

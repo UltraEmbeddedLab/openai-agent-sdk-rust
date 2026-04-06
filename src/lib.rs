@@ -45,8 +45,8 @@
 //!
 //! ### Model trait
 //!
-//! Any type that implements [`models::Model`] can serve as the LLM backend.
-//! Implement [`models::ModelProvider`] to resolve model names to [`models::Model`]
+//! Any type that implements [`Model`] can serve as the LLM backend.
+//! Implement [`ModelProvider`] to resolve model names to [`Model`]
 //! instances at runtime.
 //!
 //! ## Module Organization
@@ -165,11 +165,15 @@ pub use run_state::{CURRENT_SCHEMA_VERSION, NextStep, PendingToolCall, RunState}
 pub use runner::Runner;
 pub use schema::{ensure_strict_json_schema, json_schema_for};
 pub use stream_events::{RunItemEventName, StreamEvent};
-pub use tool::{FunctionTool, FunctionToolResult, Tool, ToolContext, function_tool};
+pub use tool::{
+    FunctionTool, FunctionToolResult, Tool, ToolContext, ToolSearchTool, function_tool,
+};
 pub use tool_guardrails::{
     GuardrailBehavior, ToolGuardrailFunctionOutput, ToolInputGuardrail, ToolInputGuardrailResult,
     ToolOutputGuardrail, ToolOutputGuardrailResult,
 };
+#[cfg(feature = "tracing-otlp")]
+pub use tracing_mod::OtlpGuard;
 pub use tracing_mod::{OtlpExporterConfig, TracingConfig};
 pub use usage::Usage;
 
@@ -198,7 +202,7 @@ pub use util::{
 ///
 /// `ModelResponse` is `#[non_exhaustive]` so it cannot be built with a struct
 /// literal outside this crate. Use this function when implementing the
-/// [`models::Model`] trait in external code such as examples, integration
+/// [`Model`] trait in external code such as examples, integration
 /// tests, or downstream crates.
 ///
 /// # Example
@@ -221,8 +225,8 @@ pub const fn new_model_response(
     usage: Usage,
     response_id: Option<String>,
     request_id: Option<String>,
-) -> items::ModelResponse {
-    items::ModelResponse {
+) -> ModelResponse {
+    ModelResponse {
         output,
         usage,
         response_id,

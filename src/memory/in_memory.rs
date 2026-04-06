@@ -18,7 +18,7 @@ use super::session::Session;
 ///
 /// This is useful for testing and single-process applications where
 /// persistence across restarts is not required. The internal history
-/// is protected by a [`tokio::sync::RwLock`] so it can be shared
+/// is protected by a [`RwLock`] so it can be shared
 /// across concurrent tasks.
 ///
 /// # Example

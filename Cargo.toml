@@ -45,7 +45,6 @@ async-trait = "0.1.89"
 rand = "0.10.0"
 
 # UUID generation
-uuid = { version = "1.23.0", features = ["v4"] }
 
 # Tokio stream utilities
 tokio-stream = "0.1"
@@ -70,8 +69,6 @@ tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-mockall = "0.14.0"
-pretty_assertions = "1.4.1"
 insta = { version = "1.47.2", features = ["json"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 wiremock = "0.6"

@@ -183,6 +183,12 @@ pub fn build_tool_specs<C: Send + Sync + 'static>(agent: &Agent<C>) -> Vec<ToolS
                 params_json_schema: json!({}),
                 strict: false,
             },
+            Tool::ToolSearch(_) => ToolSpec {
+                name: "tool_search".into(),
+                description: "Search for deferred tools by namespace.".into(),
+                params_json_schema: json!({}),
+                strict: false,
+            },
         })
         .collect()
 }

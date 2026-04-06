@@ -155,6 +155,29 @@ pub struct OtlpGuard {
 }
 
 #[cfg(feature = "tracing-otlp")]
+impl OtlpGuard {
+    /// Force-flush all buffered trace spans to the configured exporter.
+    ///
+    /// This ensures any pending spans are exported immediately rather than
+    /// waiting for the next scheduled batch export. Useful for short-lived
+    /// processes or after completing a unit of work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying trace provider fails to flush.
+    pub fn flush(&self) -> crate::error::Result<()> {
+        if let Some(provider) = &self.provider {
+            provider
+                .force_flush()
+                .map_err(|e| crate::error::AgentError::UserError {
+                    message: format!("Failed to flush traces: {e}"),
+                })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tracing-otlp")]
 impl Drop for OtlpGuard {
     fn drop(&mut self) {
         if let Some(provider) = self.provider.take() {
@@ -235,6 +258,15 @@ mod tests {
             err.to_string().contains("tracing-otlp"),
             "error message should mention the feature flag"
         );
+    }
+
+    #[cfg(feature = "tracing-otlp")]
+    #[test]
+    fn flush_with_none_provider_returns_ok() {
+        let guard = OtlpGuard { provider: None };
+        assert!(guard.flush().is_ok());
+        // Prevent the Drop impl from running shutdown on None (it's fine, but be explicit).
+        std::mem::forget(guard);
     }
 
     #[test]
