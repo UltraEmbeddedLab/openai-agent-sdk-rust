@@ -68,7 +68,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-tarpaulin
       - run: cargo tarpaulin --out xml --output-dir coverage/ --all-features
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v6
         with:
           files: coverage/cobertura.xml
           fail_ci_if_error: false
