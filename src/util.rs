@@ -136,6 +136,9 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
 /// Replaces spaces and non-alphanumeric characters (except underscores) with
 /// underscores, then lowercases the result. This mirrors the Python SDK's
 /// `transform_string_function_style` utility.
+///
+/// Emits a warning via [`tracing::warn`] when characters are replaced (not just
+/// lowercased) so callers are alerted to potential naming conflicts.
 #[must_use]
 pub fn transform_string_function_style(name: &str) -> String {
     let transformed: String = name
@@ -148,7 +151,17 @@ pub fn transform_string_function_style(name: &str) -> String {
             }
         })
         .collect();
-    transformed.to_lowercase()
+    let final_name = transformed.to_lowercase();
+
+    if transformed != name {
+        tracing::warn!(
+            "Tool name {name:?} contains invalid characters for function calling and has been \
+             transformed to {final_name:?}. Please use only letters, digits, and underscores \
+             to avoid potential naming conflicts."
+        );
+    }
+
+    final_name
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +246,7 @@ mod tests {
                 RunItem::ToolCall(ToolCallItem {
                     agent_name: "agent".to_owned(),
                     raw_item: json!({"type": "function_call"}),
+                    tool_origin: None,
                 }),
             ],
             raw_responses: vec![ModelResponse::new(

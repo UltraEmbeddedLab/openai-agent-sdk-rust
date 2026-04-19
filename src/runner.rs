@@ -154,16 +154,27 @@ impl Runner {
         let input = input.into();
         let max_turns = config.as_ref().map_or(DEFAULT_MAX_TURNS, |c| c.max_turns);
 
+        let run_loop_exception = std::sync::Arc::new(std::sync::Mutex::new(None));
+
         let result = RunResultStreaming::new(
             input.clone(),
             agent.name.clone(),
             max_turns,
             event_rx,
             cancel_tx,
+            std::sync::Arc::clone(&run_loop_exception),
         );
 
         tokio::spawn(run_loop::streaming_loop(
-            agent, input, context, model, hooks, config, event_tx, cancel_rx,
+            agent,
+            input,
+            context,
+            model,
+            hooks,
+            config,
+            event_tx,
+            cancel_rx,
+            run_loop_exception,
         ));
 
         result

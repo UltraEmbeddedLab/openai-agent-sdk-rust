@@ -119,6 +119,80 @@ pub trait Computer: Send + Sync {
     ///
     /// The path is a sequence of `(x, y)` points to drag through.
     async fn drag(&self, path: &[(i32, i32)]) -> Result<()>;
+
+    /// Click at `(x, y)` with the specified `button` while holding modifier `keys`.
+    ///
+    /// Drivers that support held modifier keys (for example Ctrl+click) should
+    /// override this method. The default implementation discards `keys` and
+    /// delegates to [`click`](Self::click), so existing drivers continue to
+    /// work unchanged.
+    async fn click_with_modifiers(
+        &self,
+        x: i32,
+        y: i32,
+        button: Button,
+        keys: Option<&[String]>,
+    ) -> Result<()> {
+        let _ = keys;
+        self.click(x, y, button).await
+    }
+
+    /// Double-click at `(x, y)` while holding modifier `keys`.
+    ///
+    /// Default implementation discards `keys` and delegates to
+    /// [`double_click`](Self::double_click).
+    async fn double_click_with_modifiers(
+        &self,
+        x: i32,
+        y: i32,
+        keys: Option<&[String]>,
+    ) -> Result<()> {
+        let _ = keys;
+        self.double_click(x, y).await
+    }
+
+    /// Scroll at `(x, y)` by `(scroll_x, scroll_y)` while holding modifier `keys`.
+    ///
+    /// Default implementation discards `keys` and delegates to
+    /// [`scroll`](Self::scroll).
+    async fn scroll_with_modifiers(
+        &self,
+        x: i32,
+        y: i32,
+        scroll_x: i32,
+        scroll_y: i32,
+        keys: Option<&[String]>,
+    ) -> Result<()> {
+        let _ = keys;
+        self.scroll(x, y, scroll_x, scroll_y).await
+    }
+
+    /// Move the cursor to `(x, y)` while holding modifier `keys`.
+    ///
+    /// Default implementation discards `keys` and delegates to
+    /// [`move_cursor`](Self::move_cursor).
+    async fn move_cursor_with_modifiers(
+        &self,
+        x: i32,
+        y: i32,
+        keys: Option<&[String]>,
+    ) -> Result<()> {
+        let _ = keys;
+        self.move_cursor(x, y).await
+    }
+
+    /// Drag along `path` while holding modifier `keys`.
+    ///
+    /// Default implementation discards `keys` and delegates to
+    /// [`drag`](Self::drag).
+    async fn drag_with_modifiers(
+        &self,
+        path: &[(i32, i32)],
+        keys: Option<&[String]>,
+    ) -> Result<()> {
+        let _ = keys;
+        self.drag(path).await
+    }
 }
 
 /// A hosted computer tool that can be given to an agent.
@@ -266,5 +340,75 @@ mod tests {
     fn button_equality() {
         assert_eq!(Button::Left, Button::Left);
         assert_ne!(Button::Left, Button::Right);
+    }
+
+    // ---- Computer default modifier-key forwarders ----
+
+    struct RecordingComputer {
+        last_click: std::sync::Mutex<Option<(i32, i32, Button)>>,
+        last_drag: std::sync::Mutex<Option<Vec<(i32, i32)>>>,
+    }
+
+    #[async_trait]
+    impl Computer for RecordingComputer {
+        async fn screenshot(&self) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn click(&self, x: i32, y: i32, button: Button) -> Result<()> {
+            *self.last_click.lock().unwrap() = Some((x, y, button));
+            Ok(())
+        }
+        async fn double_click(&self, _x: i32, _y: i32) -> Result<()> {
+            Ok(())
+        }
+        async fn scroll(&self, _x: i32, _y: i32, _sx: i32, _sy: i32) -> Result<()> {
+            Ok(())
+        }
+        async fn type_text(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn wait(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn move_cursor(&self, _x: i32, _y: i32) -> Result<()> {
+            Ok(())
+        }
+        async fn keypress(&self, _keys: &[String]) -> Result<()> {
+            Ok(())
+        }
+        async fn drag(&self, path: &[(i32, i32)]) -> Result<()> {
+            *self.last_drag.lock().unwrap() = Some(path.to_vec());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn modifier_key_variants_forward_to_base_methods() {
+        let c = RecordingComputer {
+            last_click: std::sync::Mutex::new(None),
+            last_drag: std::sync::Mutex::new(None),
+        };
+        let keys = vec!["ctrl".to_owned()];
+
+        c.click_with_modifiers(10, 20, Button::Left, Some(&keys))
+            .await
+            .unwrap();
+        assert_eq!(
+            c.last_click.lock().unwrap().as_ref(),
+            Some(&(10, 20, Button::Left))
+        );
+
+        c.drag_with_modifiers(&[(1, 2), (3, 4)], Some(&keys))
+            .await
+            .unwrap();
+        assert_eq!(
+            c.last_drag.lock().unwrap().as_ref(),
+            Some(&vec![(1, 2), (3, 4)])
+        );
+
+        // None keys also works.
+        c.double_click_with_modifiers(5, 6, None).await.unwrap();
+        c.scroll_with_modifiers(0, 0, 1, 1, None).await.unwrap();
+        c.move_cursor_with_modifiers(0, 0, None).await.unwrap();
     }
 }

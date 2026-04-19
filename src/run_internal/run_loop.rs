@@ -404,7 +404,16 @@ pub async fn streaming_loop<C: Send + Sync + 'static>(
     config: Option<RunConfig>,
     event_tx: tokio::sync::mpsc::Sender<StreamEvent>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    run_loop_exception: std::sync::Arc<std::sync::Mutex<Option<AgentError>>>,
 ) {
+    // Helper closure that stashes an error for `RunResultStreaming::run_loop_exception`.
+    let record_error = |err: AgentError| {
+        if let Ok(mut slot) = run_loop_exception.lock() {
+            if slot.is_none() {
+                *slot = Some(err);
+            }
+        }
+    };
     let config = config.unwrap_or_default();
     let ctx = Arc::new(RwLock::new(RunContextWrapper::new(context)));
     let max_turns = config.max_turns;
@@ -417,19 +426,45 @@ pub async fn streaming_loop<C: Send + Sync + 'static>(
         ModelTracing::Enabled
     };
 
-    for _turn in 0..max_turns {
+    for turn in 0..max_turns {
         // Check for cancellation.
         if cancel_rx.try_recv().is_ok() {
             return;
         }
 
+        // Run input guardrails (first turn only). A tripwire trigger halts the
+        // streamed run before any tool execution or further model calls, matching
+        // the Python SDK's behaviour (see commit `fa049a26` / issue #2688).
+        if turn == 0 {
+            let ctx_read = ctx.read().await;
+            for guardrail in &agent.input_guardrails {
+                match guardrail.run(&ctx_read, &agent.name, &input).await {
+                    Ok(result) => {
+                        if result.output.tripwire_triggered {
+                            record_error(AgentError::InputGuardrailTripwire {
+                                guardrail_name: result.guardrail_name,
+                            });
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        record_error(err);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Get system prompt via prompts module.
         let raw_instructions = {
             let ctx_read = ctx.read().await;
-            let Ok(instr) = agent.get_instructions(&ctx_read).await else {
-                return;
-            };
-            instr
+            match agent.get_instructions(&ctx_read).await {
+                Ok(instr) => instr,
+                Err(err) => {
+                    record_error(err);
+                    return;
+                }
+            }
         };
         let tool_specs_for_prompt = build_tool_specs(agent);
         let system_prompt = prompts::build_system_prompt(
@@ -487,7 +522,8 @@ pub async fn streaming_loop<C: Send + Sync + 'static>(
                                     return;
                                 }
                             }
-                            Some(Err(_)) => {
+                            Some(Err(err)) => {
+                                record_error(err);
                                 return;
                             }
                             None => {

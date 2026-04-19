@@ -205,6 +205,7 @@ mod tests {
                 item: RunItem::ToolCall(crate::items::ToolCallItem {
                     agent_name: "a".to_owned(),
                     raw_item: json!({"type": "function_call"}),
+                    tool_origin: None,
                 }),
             },
             StreamEvent::AgentUpdated {

@@ -166,7 +166,8 @@ pub use runner::Runner;
 pub use schema::{ensure_strict_json_schema, json_schema_for};
 pub use stream_events::{RunItemEventName, StreamEvent};
 pub use tool::{
-    FunctionTool, FunctionToolResult, Tool, ToolContext, ToolSearchTool, function_tool,
+    FunctionTool, FunctionToolResult, Tool, ToolContext, ToolOrigin, ToolOriginType,
+    ToolSearchTool, function_tool,
 };
 pub use tool_guardrails::{
     GuardrailBehavior, ToolGuardrailFunctionOutput, ToolInputGuardrail, ToolInputGuardrailResult,
@@ -174,7 +175,7 @@ pub use tool_guardrails::{
 };
 #[cfg(feature = "tracing-otlp")]
 pub use tracing_mod::OtlpGuard;
-pub use tracing_mod::{OtlpExporterConfig, TracingConfig};
+pub use tracing_mod::{OtlpExporterConfig, TracingConfig, flush_traces};
 pub use usage::Usage;
 
 // Utility module re-exports.

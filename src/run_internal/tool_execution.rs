@@ -81,6 +81,7 @@ pub async fn execute_tool_calls<C: Send + Sync + 'static>(
 
         // Find the matching function tool.
         let function_tool = find_function_tool(agent, tool_name);
+        let tool_origin = function_tool.and_then(|ft| ft.tool_origin.clone());
 
         let output = if let Some(ft) = function_tool {
             let tool_ctx = ToolContext {
@@ -124,6 +125,7 @@ pub async fn execute_tool_calls<C: Send + Sync + 'static>(
             agent_name: agent.name.clone(),
             raw_item: output_item,
             output: serde_json::to_value(&output).unwrap_or(json!(null)),
+            tool_origin,
         }));
 
         stop_tool_names.push(tool_name.clone());

@@ -111,9 +111,18 @@ pub fn process_model_response<C: Send + Sync + 'static>(
                     });
                 } else {
                     // This is a function tool call.
+                    let tool_origin = agent.tools.iter().find_map(|t| {
+                        if let Tool::Function(f) = t {
+                            if f.name == name {
+                                return f.tool_origin.clone();
+                            }
+                        }
+                        None
+                    });
                     new_items.push(RunItem::ToolCall(ToolCallItem {
                         agent_name: agent.name.clone(),
                         raw_item: output.clone(),
+                        tool_origin,
                     }));
                     function_calls.push(ParsedFunctionCall {
                         name,
@@ -335,6 +344,7 @@ mod tests {
             RunItem::ToolCall(ToolCallItem {
                 agent_name: "a".to_owned(),
                 raw_item: json!({"type": "function_call"}),
+                tool_origin: None,
             }),
             RunItem::MessageOutput(MessageOutputItem {
                 agent_name: "a".to_owned(),

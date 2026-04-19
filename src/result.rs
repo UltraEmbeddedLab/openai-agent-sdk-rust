@@ -119,6 +119,14 @@ pub struct RunResultStreaming {
     event_rx: Option<tokio::sync::mpsc::Receiver<StreamEvent>>,
     /// Cancellation token for the background streaming task.
     cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Shared storage for the exception raised by the background run loop, if any.
+    ///
+    /// When the run loop fails before producing stream events (for example
+    /// during early model setup), the error may not be re-raised through
+    /// [`stream_events`](Self::stream_events). This slot gives callers a
+    /// reliable way to check for silent failures after consuming the stream
+    /// via [`run_loop_exception`](Self::run_loop_exception).
+    run_loop_exception: std::sync::Arc<std::sync::Mutex<Option<AgentError>>>,
 }
 
 impl RunResultStreaming {
@@ -130,6 +138,7 @@ impl RunResultStreaming {
         max_turns: u32,
         event_rx: tokio::sync::mpsc::Receiver<StreamEvent>,
         cancel_tx: tokio::sync::oneshot::Sender<()>,
+        run_loop_exception: std::sync::Arc<std::sync::Mutex<Option<AgentError>>>,
     ) -> Self {
         Self {
             input,
@@ -145,7 +154,41 @@ impl RunResultStreaming {
             usage: Usage::default(),
             event_rx: Some(event_rx),
             cancel_tx: Some(cancel_tx),
+            run_loop_exception,
         }
+    }
+
+    /// The message of the exception raised by the background run loop, if any.
+    ///
+    /// When the run loop fails before producing stream events — for example
+    /// during early model setup or tool spec construction — the error may not
+    /// be re-raised through [`stream_events`](Self::stream_events). This
+    /// accessor returns the `Display` form of the stored error so callers can
+    /// reliably check for silent failures after consuming the stream.
+    ///
+    /// Returns `None` if the run loop completed without error or has not yet
+    /// settled.
+    ///
+    /// Use [`take_run_loop_exception`](Self::take_run_loop_exception) to move
+    /// the concrete [`AgentError`] out of the result for further handling.
+    ///
+    /// Mirrors the Python SDK's `RunResultStreaming.run_loop_exception`
+    /// property introduced in v0.14.2.
+    #[must_use]
+    pub fn run_loop_exception(&self) -> Option<String> {
+        let guard = self.run_loop_exception.lock().ok()?;
+        guard.as_ref().map(std::string::ToString::to_string)
+    }
+
+    /// Take the exception raised by the background run loop, if any.
+    ///
+    /// Unlike [`run_loop_exception`](Self::run_loop_exception) this method
+    /// moves the stored [`AgentError`] out of the result, leaving the slot
+    /// empty. Useful for re-raising the error with `?` after consuming the
+    /// stream.
+    #[must_use]
+    pub fn take_run_loop_exception(&self) -> Option<AgentError> {
+        self.run_loop_exception.lock().ok()?.take()
     }
 
     /// Stream events as they are produced by the runner.
@@ -183,6 +226,16 @@ impl RunResultStreaming {
     /// into `T`.
     pub fn final_output_as<T: DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_value(self.final_output.clone()).map_err(AgentError::from)
+    }
+}
+
+#[cfg(test)]
+impl RunResultStreaming {
+    /// Test-only helper that installs an exception into the run-loop error slot.
+    pub(crate) fn set_run_loop_exception(&self, err: AgentError) {
+        if let Ok(mut slot) = self.run_loop_exception.lock() {
+            *slot = Some(err);
+        }
     }
 }
 
@@ -419,7 +472,10 @@ mod tests {
             10,
             rx,
             cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
+        // No run-loop exception should be present on a fresh result.
+        assert!(result.run_loop_exception().is_none());
 
         assert_eq!(result.current_agent_name, "my_agent");
         assert_eq!(result.max_turns, 10);
@@ -446,6 +502,7 @@ mod tests {
             10,
             rx,
             cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
 
         // Send some events.
@@ -488,6 +545,7 @@ mod tests {
             10,
             rx,
             cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
 
         // Take the stream once, then drop it.
@@ -514,6 +572,7 @@ mod tests {
             10,
             rx,
             cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
 
         // Cancel should send the signal.
@@ -545,6 +604,7 @@ mod tests {
             10,
             rx,
             cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
 
         // Simulate the runner setting the final output.
@@ -591,6 +651,7 @@ mod tests {
             5,
             rx,
             cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
         );
 
         let debug_str = format!("{result:?}");
@@ -600,6 +661,47 @@ mod tests {
         // Should NOT contain channel fields.
         assert!(!debug_str.contains("event_rx"));
         assert!(!debug_str.contains("cancel_tx"));
+    }
+
+    // ---- run_loop_exception surface ----
+
+    #[test]
+    fn run_loop_exception_is_none_by_default() {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(1);
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let result = RunResultStreaming::new(
+            InputContent::Text("hi".to_owned()),
+            "a".to_owned(),
+            1,
+            rx,
+            cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        assert!(result.run_loop_exception().is_none());
+    }
+
+    #[test]
+    fn run_loop_exception_surfaces_stored_error() {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(1);
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let result = RunResultStreaming::new(
+            InputContent::Text("hi".to_owned()),
+            "a".to_owned(),
+            1,
+            rx,
+            cancel_tx,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+        result.set_run_loop_exception(AgentError::UserError {
+            message: "boom".to_owned(),
+        });
+        let msg = result.run_loop_exception().expect("expected error");
+        assert!(msg.contains("boom"));
+        // Re-reading is still possible (no consumption by default).
+        assert!(result.run_loop_exception().is_some());
+        // Taking consumes.
+        assert!(result.take_run_loop_exception().is_some());
+        assert!(result.run_loop_exception().is_none());
     }
 
     // ---- Send + Sync bounds ----

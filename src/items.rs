@@ -141,6 +141,14 @@ pub struct ToolCallItem {
     pub agent_name: String,
     /// The raw tool call item from the API.
     pub raw_item: serde_json::Value,
+    /// Optional metadata describing the source of a function-tool-backed call.
+    ///
+    /// Set by the run loop for tool calls that map to a registered
+    /// [`FunctionTool`](crate::tool::FunctionTool) so downstream consumers can
+    /// distinguish plain function tools from MCP-backed tools and
+    /// agent-as-tool wrappers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_origin: Option<crate::tool::ToolOrigin>,
 }
 
 /// The output of a tool call execution.
@@ -153,6 +161,9 @@ pub struct ToolCallOutputItem {
     pub raw_item: serde_json::Value,
     /// The output value produced by the tool.
     pub output: serde_json::Value,
+    /// Optional metadata describing the source of a function-tool-backed output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_origin: Option<crate::tool::ToolOrigin>,
 }
 
 /// A reasoning item produced by the model during chain-of-thought.
@@ -439,6 +450,7 @@ mod tests {
         let item = RunItem::ToolCall(ToolCallItem {
             agent_name: "agent".to_owned(),
             raw_item: json!({"type": "function_call", "name": "get_weather"}),
+            tool_origin: None,
         });
         assert!(matches!(item, RunItem::ToolCall(_)));
     }
@@ -449,6 +461,7 @@ mod tests {
             agent_name: "agent".to_owned(),
             raw_item: json!({"type": "function_call_output"}),
             output: json!("sunny"),
+            tool_origin: None,
         });
         if let RunItem::ToolCallOutput(ref tco) = item {
             assert_eq!(tco.output, json!("sunny"));
@@ -571,6 +584,41 @@ mod tests {
         assert_eq!(ItemHelpers::extract_text(&msg), None);
     }
 
+    #[test]
+    fn extract_text_tolerates_null_text() {
+        // Regression: `text` can be null when output items are assembled via
+        // partial streaming responses or surfaced through provider gateways
+        // like LiteLLM. Null/missing text should be silently skipped.
+        let msg = json!({
+            "type": "message",
+            "content": [
+                {"type": "output_text", "text": null},
+                {"type": "output_text", "text": "hello"}
+            ]
+        });
+        assert_eq!(ItemHelpers::extract_text(&msg), Some("hello".to_owned()));
+
+        // Single null-text item yields None.
+        let msg_only_null = json!({
+            "type": "message",
+            "content": [{"type": "output_text", "text": null}]
+        });
+        assert_eq!(ItemHelpers::extract_text(&msg_only_null), None);
+
+        // Missing text field is also tolerated.
+        let msg_missing = json!({
+            "type": "message",
+            "content": [
+                {"type": "output_text"},
+                {"type": "output_text", "text": "world"}
+            ]
+        });
+        assert_eq!(
+            ItemHelpers::extract_text(&msg_missing),
+            Some("world".to_owned())
+        );
+    }
+
     // ---- ItemHelpers::input_to_new_input_list ----
 
     #[test]
@@ -608,6 +656,7 @@ mod tests {
             RunItem::ToolCall(ToolCallItem {
                 agent_name: "agent".to_owned(),
                 raw_item: json!({"type": "function_call"}),
+                tool_origin: None,
             }),
             RunItem::MessageOutput(MessageOutputItem {
                 agent_name: "agent".to_owned(),
@@ -632,6 +681,7 @@ mod tests {
         let items = vec![RunItem::ToolCall(ToolCallItem {
             agent_name: "agent".to_owned(),
             raw_item: json!({"type": "function_call"}),
+            tool_origin: None,
         })];
         let result = ItemHelpers::text_message_outputs(&items);
         assert_eq!(result, "");

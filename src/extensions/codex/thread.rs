@@ -704,6 +704,7 @@ mod tests {
                 "name": "get_weather",
                 "arguments": "{\"city\":\"SF\"}"
             }),
+            tool_origin: None,
         });
         let result = run_item_to_thread_item(&item, 1);
         assert!(result.is_some());
@@ -722,6 +723,7 @@ mod tests {
             agent_name: "test".to_owned(),
             raw_item: serde_json::json!({}),
             output: serde_json::json!("result"),
+            tool_origin: None,
         });
         assert!(run_item_to_thread_item(&item, 1).is_none());
     }

@@ -22,6 +22,14 @@ const TOOL_INPUT_TYPES: &[&str] = &[
     "mcp_approval_response",
     "tool_search_call",
     "tool_search_output",
+    "code_interpreter_call",
+    "image_generation_call",
+    "local_shell_call",
+    "local_shell_call_output",
+    "shell_call",
+    "shell_call_output",
+    "apply_patch_call",
+    "apply_patch_call_output",
 ];
 
 /// Create a [`HandoffInputFilter`] that removes all tool-related items from
@@ -114,6 +122,7 @@ mod tests {
                 RunItem::ToolCall(ToolCallItem {
                     agent_name: "a".to_owned(),
                     raw_item: json!({"type": "function_call"}),
+                    tool_origin: None,
                 }),
                 RunItem::Reasoning(ReasoningItem {
                     agent_name: "a".to_owned(),
@@ -129,6 +138,7 @@ mod tests {
                     agent_name: "a".to_owned(),
                     raw_item: json!({"type": "function_call_output"}),
                     output: json!("result"),
+                    tool_origin: None,
                 }),
                 RunItem::MessageOutput(MessageOutputItem {
                     agent_name: "a".to_owned(),
@@ -175,6 +185,42 @@ mod tests {
 
         assert_eq!(filtered.new_items.len(), 1);
         assert!(matches!(filtered.new_items[0], RunItem::MessageOutput(_)));
+    }
+
+    #[tokio::test]
+    async fn remove_all_tools_filters_hosted_tool_types() {
+        let filter = remove_all_tools();
+        let hosted_types = [
+            "code_interpreter_call",
+            "image_generation_call",
+            "local_shell_call",
+            "local_shell_call_output",
+            "shell_call",
+            "shell_call_output",
+            "apply_patch_call",
+            "apply_patch_call_output",
+        ];
+        let mut items = vec![json!({"role": "user", "content": "Hello"})];
+        for t in hosted_types {
+            items.push(json!({"id": "ht1", "type": t}));
+        }
+        items.push(json!({"role": "user", "content": "World"}));
+
+        let data = HandoffInputData {
+            input_history: InputContent::Items(items),
+            pre_handoff_items: vec![],
+            new_items: vec![],
+        };
+        let filtered = filter(data).await;
+        if let InputContent::Items(items) = &filtered.input_history {
+            assert_eq!(items.len(), 2);
+            for item in items {
+                let ty = item.get("type").and_then(serde_json::Value::as_str);
+                assert!(!hosted_types.contains(&ty.unwrap_or("")));
+            }
+        } else {
+            panic!("expected Items variant");
+        }
     }
 
     #[tokio::test]

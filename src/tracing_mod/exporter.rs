@@ -24,6 +24,46 @@
 
 use crate::error::{AgentError, Result};
 
+#[cfg(feature = "tracing-otlp")]
+use std::sync::{Mutex, OnceLock};
+
+/// Global reference to the initialized OTLP tracer provider, set by
+/// [`init_otlp_tracing`] so the top-level [`flush_traces`] function can
+/// force-flush buffered spans without the caller holding an [`OtlpGuard`].
+#[cfg(feature = "tracing-otlp")]
+static GLOBAL_TRACER_PROVIDER: OnceLock<
+    Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider>>,
+> = OnceLock::new();
+
+/// Force immediate export of buffered traces and spans.
+///
+/// The OTLP batch exporter already exports traces periodically in the
+/// background. Call this when a worker, background job, or request handler
+/// needs traces to be visible immediately after a unit of work finishes
+/// instead of waiting for the next scheduled flush.
+///
+/// Returns `Ok(())` even when no exporter has been initialised, matching the
+/// Python SDK's no-op behaviour when tracing is disabled.
+///
+/// # Errors
+///
+/// Returns an error if the underlying trace provider fails to flush.
+pub fn flush_traces() -> Result<()> {
+    #[cfg(feature = "tracing-otlp")]
+    {
+        if let Some(lock) = GLOBAL_TRACER_PROVIDER.get() {
+            if let Ok(guard) = lock.lock() {
+                if let Some(provider) = guard.as_ref() {
+                    provider.force_flush().map_err(|e| AgentError::UserError {
+                        message: format!("Failed to flush traces: {e}"),
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Configuration for the OTLP exporter.
 ///
 /// Use the builder methods to customise the endpoint and service name.
@@ -112,6 +152,12 @@ pub fn init_otlp_tracing(config: OtlpExporterConfig) -> Result<OtlpGuard> {
         .with_resource(resource)
         .build();
 
+    // Register the provider globally so `flush_traces()` can find it.
+    let slot = GLOBAL_TRACER_PROVIDER.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(provider.clone());
+    }
+
     let tracer = provider.tracer(config.service_name);
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
@@ -181,6 +227,13 @@ impl OtlpGuard {
 impl Drop for OtlpGuard {
     fn drop(&mut self) {
         if let Some(provider) = self.provider.take() {
+            // Clear the global reference so `flush_traces()` becomes a no-op
+            // after shutdown.
+            if let Some(slot) = GLOBAL_TRACER_PROVIDER.get() {
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = None;
+                }
+            }
             if let Err(e) = provider.shutdown() {
                 eprintln!("Failed to shut down OTLP trace provider: {e}");
             }
@@ -267,6 +320,13 @@ mod tests {
         assert!(guard.flush().is_ok());
         // Prevent the Drop impl from running shutdown on None (it's fine, but be explicit).
         std::mem::forget(guard);
+    }
+
+    #[test]
+    fn flush_traces_is_noop_when_uninitialised() {
+        // `flush_traces()` must return Ok(()) when no OTLP provider has been
+        // initialised, matching the Python SDK's no-op behaviour.
+        assert!(flush_traces().is_ok());
     }
 
     #[test]

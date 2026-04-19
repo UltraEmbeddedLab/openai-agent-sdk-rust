@@ -87,6 +87,102 @@ impl<C: Send + Sync + 'static> fmt::Debug for ToolContext<C> {
 }
 
 // ---------------------------------------------------------------------------
+// ToolOrigin — metadata describing where a function-tool-backed item came from
+// ---------------------------------------------------------------------------
+
+/// Enumerates the runtime source of a function-tool-backed run item.
+///
+/// Mirrors the Python SDK's `ToolOriginType`. The value is attached to
+/// [`ToolCallItem`](crate::items::ToolCallItem) and
+/// [`ToolCallOutputItem`](crate::items::ToolCallOutputItem) through the
+/// [`ToolOrigin`] struct so downstream consumers can tell whether a tool call
+/// originated from a plain function tool, an MCP server tool, or an
+/// agent-as-tool wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolOriginType {
+    /// The tool is a plain function tool.
+    Function,
+    /// The tool is backed by an MCP server.
+    Mcp,
+    /// The tool is an agent-as-tool wrapper.
+    AgentAsTool,
+}
+
+impl ToolOriginType {
+    /// Return the canonical wire string for this origin type.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Mcp => "mcp",
+            Self::AgentAsTool => "agent_as_tool",
+        }
+    }
+}
+
+/// Serializable metadata describing where a function-tool-backed item came from.
+///
+/// Attached to tool call and tool output run items so callers can trace each
+/// item back to the specific agent, MCP server, or tool wrapper that produced
+/// it. Mirrors the Python SDK's `ToolOrigin` dataclass.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ToolOrigin {
+    /// The origin type of the tool.
+    #[serde(rename = "type")]
+    pub origin_type: ToolOriginType,
+    /// Name of the MCP server, when `origin_type` is `Mcp`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_server_name: Option<String>,
+    /// Name of the wrapped agent, when `origin_type` is `AgentAsTool`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// Exposed tool name for the agent-as-tool, when `origin_type` is `AgentAsTool`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tool_name: Option<String>,
+}
+
+impl ToolOrigin {
+    /// Create a new origin marker for a plain function tool.
+    #[must_use]
+    pub const fn function() -> Self {
+        Self {
+            origin_type: ToolOriginType::Function,
+            mcp_server_name: None,
+            agent_name: None,
+            agent_tool_name: None,
+        }
+    }
+
+    /// Create a new origin marker for an MCP-backed tool.
+    #[must_use]
+    pub fn mcp(server_name: impl Into<String>) -> Self {
+        Self {
+            origin_type: ToolOriginType::Mcp,
+            mcp_server_name: Some(server_name.into()),
+            agent_name: None,
+            agent_tool_name: None,
+        }
+    }
+
+    /// Create a new origin marker for an agent-as-tool wrapper.
+    #[must_use]
+    pub fn agent_as_tool(
+        agent_name: impl Into<String>,
+        agent_tool_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            origin_type: ToolOriginType::AgentAsTool,
+            mcp_server_name: None,
+            agent_name: Some(agent_name.into()),
+            agent_tool_name: Some(agent_tool_name.into()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FunctionTool
 // ---------------------------------------------------------------------------
 
@@ -111,6 +207,14 @@ pub struct FunctionTool<C: Send + Sync + 'static = ()> {
     pub is_enabled: bool,
     /// Whether the tool requires user approval before execution.
     pub needs_approval: bool,
+    /// Optional origin metadata attached to tool call and tool output items.
+    ///
+    /// When set, the run loop copies this value onto
+    /// [`ToolCallItem::tool_origin`](crate::items::ToolCallItem) and
+    /// [`ToolCallOutputItem::tool_origin`](crate::items::ToolCallOutputItem)
+    /// so callers can see whether the tool originated from an agent-as-tool
+    /// wrapper, an MCP server, or a plain function.
+    pub tool_origin: Option<ToolOrigin>,
     /// The invoke function, stored as a type-erased async closure.
     invoke_fn: InvokeFn<C>,
 }
@@ -124,6 +228,7 @@ impl<C: Send + Sync + 'static> Clone for FunctionTool<C> {
             strict_json_schema: self.strict_json_schema,
             is_enabled: self.is_enabled,
             needs_approval: self.needs_approval,
+            tool_origin: self.tool_origin.clone(),
             invoke_fn: Arc::clone(&self.invoke_fn),
         }
     }
@@ -138,6 +243,7 @@ impl<C: Send + Sync + 'static> fmt::Debug for FunctionTool<C> {
             .field("strict_json_schema", &self.strict_json_schema)
             .field("is_enabled", &self.is_enabled)
             .field("needs_approval", &self.needs_approval)
+            .field("tool_origin", &self.tool_origin)
             .finish_non_exhaustive()
     }
 }
@@ -190,8 +296,23 @@ impl<C: Send + Sync + 'static> FunctionTool<C> {
             strict_json_schema: false,
             is_enabled: true,
             needs_approval: false,
+            tool_origin: Some(ToolOrigin::function()),
             invoke_fn,
         }
+    }
+
+    /// Create an MCP-tool variant of [`Self::mcp_tool`] that records the
+    /// originating server name on [`Self::tool_origin`].
+    #[must_use]
+    pub(crate) fn mcp_tool_with_server(
+        name: String,
+        description: String,
+        input_schema: serde_json::Value,
+        server_name: impl Into<String>,
+    ) -> Self {
+        let mut tool = Self::mcp_tool(name, description, input_schema);
+        tool.tool_origin = Some(ToolOrigin::mcp(server_name));
+        tool
     }
 }
 
@@ -465,6 +586,7 @@ where
         strict_json_schema: true,
         is_enabled: true,
         needs_approval: false,
+        tool_origin: Some(ToolOrigin::function()),
         invoke_fn,
     })
 }

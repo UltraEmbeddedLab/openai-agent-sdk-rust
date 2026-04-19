@@ -605,10 +605,11 @@ impl MCPServer {
                     }
                 }
 
-                Tool::Function(crate::tool::FunctionTool::mcp_tool(
+                Tool::Function(crate::tool::FunctionTool::mcp_tool_with_server(
                     def.name,
                     def.description.unwrap_or_default(),
                     schema,
+                    self.name(),
                 ))
             })
             .collect();

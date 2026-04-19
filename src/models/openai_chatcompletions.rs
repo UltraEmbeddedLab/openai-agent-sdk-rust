@@ -335,8 +335,15 @@ fn convert_response(response_json: &serde_json::Value) -> Result<ModelResponse> 
         .get("choices")
         .and_then(serde_json::Value::as_array)
         .and_then(|arr| arr.first())
-        .ok_or_else(|| AgentError::ModelBehavior {
-            message: "No choices in Chat Completions response".to_owned(),
+        .ok_or_else(|| {
+            let provider_error = response_json.get("error");
+            let error_details = provider_error.map_or(String::new(), |err| format!(": {err}"));
+            AgentError::ModelBehavior {
+                message: format!(
+                    "ChatCompletion response has no choices \
+                     (possible provider error payload){error_details}"
+                ),
+            }
         })?;
 
     let message = choice
@@ -1399,6 +1406,31 @@ mod tests {
         assert_eq!(body["frequency_penalty"], 0.5);
         assert_eq!(body["presence_penalty"], 0.3);
         assert_eq!(body["tool_choice"], "required");
+    }
+
+    #[test]
+    fn build_body_forwards_extra_body() {
+        // Regression test for LiteLLM extra_body forwarding (Python fix 4f3c8a53):
+        // both extra_body and extra_args keys must land in the outgoing request
+        // body so downstream proxies (LiteLLM, Azure, etc.) receive them.
+        let mut extra_args = std::collections::HashMap::new();
+        extra_args.insert("custom_arg".to_owned(), json!("xyz"));
+
+        let settings = ModelSettings {
+            extra_body: Some(json!({
+                "vendor_flag": true,
+                "safety_identifier": "abc",
+                "reasoning_effort": "high",
+            })),
+            extra_args: Some(extra_args),
+            ..Default::default()
+        };
+
+        let body = build_request_body("gpt-4o", None, &[], &settings, &[], None, &[], false);
+        assert_eq!(body["vendor_flag"], true);
+        assert_eq!(body["safety_identifier"], "abc");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["custom_arg"], "xyz");
     }
 
     #[test]

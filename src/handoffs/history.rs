@@ -727,6 +727,7 @@ mod tests {
                 pre_handoff_items: vec![RunItem::ToolCall(ToolCallItem {
                     agent_name: "agent_a".to_owned(),
                     raw_item: json!({"type": "function_call", "name": "get_weather", "arguments": "{}"}),
+                    tool_origin: None,
                 })],
                 new_items: vec![RunItem::HandoffCall(HandoffCallItem {
                     agent_name: "agent_a".to_owned(),
@@ -760,6 +761,7 @@ mod tests {
                         agent_name: "a".to_owned(),
                         raw_item: json!({"type": "function_call_output", "output": "result"}),
                         output: json!("result"),
+                        tool_origin: None,
                     }),
                 ],
                 new_items: vec![],
