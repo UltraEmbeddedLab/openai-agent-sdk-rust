@@ -477,8 +477,7 @@ fn uuid_v4() -> String {
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
 
     // Use timestamp-based pseudo-random ID. Not cryptographic, but sufficient
     // for thread identification in a single process.

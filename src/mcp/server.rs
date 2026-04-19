@@ -876,14 +876,14 @@ impl MCPServer {
             .write_all(b"\n")
             .await
             .map_err(|e| AgentError::UserError {
-                message: format!("Failed to write newline to MCP server '{server_name}': {e}",),
+                message: format!("Failed to write newline to MCP server '{server_name}': {e}"),
             })?;
         stdio
             .writer
             .flush()
             .await
             .map_err(|e| AgentError::UserError {
-                message: format!("Failed to flush MCP server '{server_name}' stdin: {e}",),
+                message: format!("Failed to flush MCP server '{server_name}' stdin: {e}"),
             })?;
 
         // Read the response line. Skip blank lines and notifications (messages
@@ -896,12 +896,12 @@ impl MCPServer {
                     .read_line(&mut line)
                     .await
                     .map_err(|e| AgentError::UserError {
-                        message: format!("Failed to read from MCP server '{server_name}': {e}",),
+                        message: format!("Failed to read from MCP server '{server_name}': {e}"),
                     })?;
 
             if bytes_read == 0 {
                 return Err(AgentError::UserError {
-                    message: format!("MCP server '{server_name}' closed stdout unexpectedly",),
+                    message: format!("MCP server '{server_name}' closed stdout unexpectedly"),
                 });
             }
 
@@ -929,9 +929,7 @@ impl MCPServer {
 
             let response: JsonRpcResponse =
                 serde_json::from_value(value).map_err(|e| AgentError::UserError {
-                    message: format!(
-                        "Failed to parse JSON-RPC response from '{server_name}': {e}",
-                    ),
+                    message: format!("Failed to parse JSON-RPC response from '{server_name}': {e}"),
                 })?;
 
             if let Some(error) = response.error {
@@ -967,14 +965,14 @@ impl MCPServer {
             .send()
             .await
             .map_err(|e| AgentError::UserError {
-                message: format!("MCP HTTP request to '{server_name}' failed: {e}",),
+                message: format!("MCP HTTP request to '{server_name}' failed: {e}"),
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(AgentError::UserError {
-                message: format!("MCP HTTP request to '{server_name}' failed ({status}): {body}",),
+                message: format!("MCP HTTP request to '{server_name}' failed ({status}): {body}"),
             });
         }
 
@@ -990,7 +988,7 @@ impl MCPServer {
         // The response body may be JSON-RPC directly, or SSE-wrapped.
         // Try to parse as JSON-RPC first.
         let body = response.text().await.map_err(|e| AgentError::UserError {
-            message: format!("Failed to read HTTP response from '{server_name}': {e}",),
+            message: format!("Failed to read HTTP response from '{server_name}': {e}"),
         })?;
 
         // Some SSE-style responses wrap the JSON in `data: ` lines.
@@ -999,7 +997,7 @@ impl MCPServer {
         let json_response: JsonRpcResponse =
             serde_json::from_str(json_text).map_err(|e| AgentError::UserError {
                 message: format!(
-                    "Failed to parse JSON-RPC response from '{server_name}': {e}\nBody: {body}",
+                    "Failed to parse JSON-RPC response from '{server_name}': {e}\nBody: {body}"
                 ),
             })?;
 
