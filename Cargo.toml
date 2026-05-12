@@ -62,7 +62,7 @@ base64 = { version = "0.22.1", optional = true }
 rusqlite = { version = "0.39.0", features = ["bundled"], optional = true }
 
 # OpenTelemetry OTLP export (optional, for tracing-otlp feature)
-opentelemetry = { version = "0.31", optional = true }
+opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
